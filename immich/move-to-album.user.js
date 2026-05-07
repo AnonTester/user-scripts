@@ -7,8 +7,8 @@
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
 // @supportURL   https://github.com/AnonTester/user-scripts/issues
-// @updateURL    https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/move-to-album.js
-// @downloadURL  https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/move-to-album.js
+// @updateURL    https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/move-to-album.user.js
+// @downloadURL  https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/move-to-album.user.js
 // @match        http://*/*
 // @match        https://*/*
 // @grant        GM_getValue

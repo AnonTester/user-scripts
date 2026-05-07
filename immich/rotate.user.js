@@ -7,8 +7,8 @@
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
 // @supportURL   https://github.com/AnonTester/user-scripts/issues
-// @updateURL    https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/rotate.js
-// @downloadURL  https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/rotate.js
+// @updateURL    https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/rotate.user.js
+// @downloadURL  https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/rotate.user.js
 // @match        http://*/*
 // @match        https://*/*
 // @grant        GM_getValue
