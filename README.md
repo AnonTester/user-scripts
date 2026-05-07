@@ -13,14 +13,12 @@ Violentmonkey and Tampermonkey are browser extensions that let you install and r
 
 Install **one** extension for your browser:
 
-- Chrome:
-  - Violentmonkey: <https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag>
-  - Tampermonkey: <https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo>
 - Firefox:
   - Violentmonkey: <https://addons.mozilla.org/firefox/addon/violentmonkey/>
   - Tampermonkey: <https://addons.mozilla.org/firefox/addon/tampermonkey/>
+- Chrome:
+  - Tampermonkey: <https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo>
 - Edge:
-  - Violentmonkey: <https://microsoftedge.microsoft.com/addons/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag>
   - Tampermonkey: <https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd>
 
 ## Install Scripts From This Repo
