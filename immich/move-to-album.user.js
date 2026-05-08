@@ -2,7 +2,7 @@
 // @name         Immich Move to Album
 // @namespace    https://immich.app/
 // @icon         data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACIUlEQVQ4T3VTv2/TUBC+e47THxSpK5v7L5iAuuVZYurUslJRS/wBSSREBojiioGRZEVCpRsDUoMC7QKqm4GFlgbEWtVBlVigsUBQkcTvuGcR10nDSZbt83ff3fe9M8KE6MucRKCqIpL6s0D0+VbP+AeNcTiOJ87komVQ73gScYTCmfH3NVkSFwgG0nYVwcYkAiAsZlsH9QsE37zXrkHqMQNCheBnj95sTp20NoDASoNNIZbhnqoBdwDEOi59qGHX27FUNBgZmTUHcPqlNPv56RoSLQ9JxA21ImyxNXxHIRzsVptbSkECGumI6E63qg4QrRFCkC3DOqlzecjm4mm12eXk/IguASEN6FlWZBqXHy7t9eTVQwFQM8rkMTaRxQaG+L3SZEGpUFS7Y+b2Arjitz0M9Rd9MtPlnkx3T2R0K692FZDkcYKP6lLprpmTbF5hKjNnvXuAnSGQduzjdHedjyV8ZROz/X7hibnw8gUs8PFRPGKagLbtIpNWedRYqh6dq31AsxTvweKjM6v/J9odFutcf+7E/ZS7X+NHBkIbFHQgIwIYDJhE8KUa4DTCmODa+u+CokiDkxBoFN/nb+nOI7twDqAi5Bv1/xIgoL/v3ObODJwUIkUgPZr/Cb8O0xJ0zdH1yko400kWJ8UTsEsOOM+D5F+Y5EMsQ65aY1Mkxf8MHZ3P9n64CCJPfKyKZuvxLry96YKh8kBGGyDa1OYNq/4CqB/zUEwubakAAAAASUVORK5CYII=
-// @version      1.0.2
+// @version      1.0.4
 // @description  Move selected/current Immich assets to another album using Immich's native add-to-album modal, then remove them from the current album.
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
@@ -140,6 +140,8 @@
 
     pollMs: 500,
     autoReloadAfterMove: true,
+    membershipPollMs: 900,
+    membershipMonitorTimeoutMs: 90_000,
   };
 
   const state = {
@@ -149,11 +151,14 @@
 
     learnedAlbumId: null,
     learnedAlbumAt: 0,
+    lastLearnedAlbumLogKey: '',
+    lastLearnedAlbumLogAt: 0,
 
     selectedAssetIds: new Set(),
     selectionCacheViewKey: null,
     lastSelectionSeenAt: 0,
     lastScrollAt: 0,
+    membershipMonitorTimer: null,
   };
 
   injectStyles();
@@ -479,11 +484,24 @@
   function rememberSourceAlbum(albumId, reason = '') {
     if (!albumId || !isUuid(albumId)) return;
 
+    const now = Date.now();
+    const previousAlbumId = state.learnedAlbumId;
+
     state.learnedAlbumId = albumId;
-    state.learnedAlbumAt = Date.now();
+    state.learnedAlbumAt = now;
     state.currentAlbumId = albumId;
 
-    console.debug?.('[Immich Move] Learned source album:', albumId, reason);
+    const logKey = `${albumId}|${reason}`;
+    const shouldLog =
+      previousAlbumId !== albumId ||
+      state.lastLearnedAlbumLogKey !== logKey ||
+      now - state.lastLearnedAlbumLogAt > 15000;
+
+    if (shouldLog) {
+      console.debug?.('[Immich Move] Learned source album:', albumId, reason);
+      state.lastLearnedAlbumLogKey = logKey;
+      state.lastLearnedAlbumLogAt = now;
+    }
   }
 
   function extractAlbumIdFromAnyAlbumEndpoint(rawUrl) {
@@ -504,10 +522,22 @@
     const pending = state.pendingMove;
     if (!pending) return;
 
-    if (!['PUT', 'POST'].includes(requestInfo.method)) return;
+    if (!['PUT', 'POST', 'PATCH'].includes(requestInfo.method)) return;
 
-    const targetAlbumId = extractAlbumIdFromAssetEndpoint(requestInfo.url);
-    if (!targetAlbumId) return;
+    const parsedBody = parseJsonBody(requestInfo.bodyText);
+    const targetAlbumId = extractTargetAlbumIdFromAddRequest(requestInfo, parsedBody);
+
+    if (!targetAlbumId) {
+      const url = safeParseUrl(requestInfo.url);
+      if (url?.pathname.includes('/api/albums')) {
+        console.debug?.('[Immich Move] Pending move ignored: album add request had no target album ID.', {
+          method: requestInfo.method,
+          url: requestInfo.url,
+          bodyText: requestInfo.bodyText,
+        });
+      }
+      return;
+    }
 
     console.debug?.('[Immich Move] Saw album asset add candidate:', {
       method: requestInfo.method,
@@ -520,7 +550,7 @@
       ok: response.ok,
     });
 
-    const requestIds = parseIdsFromRequestBody(requestInfo.bodyText);
+    const requestIds = parseIdsFromRequestBody(requestInfo.bodyText, parsedBody);
 
     let relevantIds;
 
@@ -548,62 +578,118 @@
       return;
     }
 
-    if (!response.ok) {
+    let confirmedIds = relevantIds;
+    let addResult = null;
+    let addResultParsed = false;
+
+    try {
+      addResult = await response.json();
+      addResultParsed = true;
+
+      console.debug?.('[Immich Move] Album add response JSON:', addResult);
+    } catch {
+      // Ignore parse failures; we'll fall back to HTTP status + request IDs below.
+    }
+
+    const duplicateOnlyFailure = !response.ok && isDuplicateAddFailure(addResult);
+
+    if (!response.ok && !duplicateOnlyFailure) {
       notify(`Immich did not add the asset${relevantIds.length === 1 ? '' : 's'} to the target album. Nothing was removed.`, 'error');
       state.pendingMove = null;
+      stopMembershipMonitor();
       return;
     }
 
-    let confirmedIds = relevantIds;
+    if (duplicateOnlyFailure) {
+      console.debug?.('[Immich Move] Add request reported duplicate/already-exists; continuing with source removal.');
+    }
 
-    try {
-      const result = await response.json();
-
-      console.debug?.('[Immich Move] Album add response JSON:', result);
-
-      const successful = extractSuccessfulAssetIdsFromAddResponse(result);
+    if (addResultParsed) {
+      const successful = extractSuccessfulAssetIdsFromAddResponse(addResult);
 
       if (successful.length > 0) {
         // Intersect against the actual Immich request IDs, not the userscript's pending IDs.
         confirmedIds = relevantIds.filter((id) => successful.includes(id));
       }
-    } catch {
+    }
+
+    if (confirmedIds.length === 0 && duplicateOnlyFailure) {
+      // Duplicate responses can omit per-asset success rows, but we still want
+      // to remove those requested assets from the source album.
+      confirmedIds = relevantIds;
+    }
+
+    if (!addResultParsed && response.ok) {
       console.debug?.('[Immich Move] Album add response was not JSON or could not be parsed; treating HTTP success as success.');
     }
 
     if (confirmedIds.length === 0) {
       notify('Assets were added, but the script could not confirm which IDs succeeded. Nothing was removed.', 'error');
       state.pendingMove = null;
+      stopMembershipMonitor();
       return;
     }
+
+    await finalizeMoveAfterTargetDetected({
+      pending,
+      targetAlbumId,
+      confirmedIds,
+      detectionReason: 'intercepted album-add response',
+    });
+  }
+
+  async function finalizeMoveAfterTargetDetected({
+    pending,
+    targetAlbumId,
+    confirmedIds,
+    detectionReason = '',
+  }) {
+    if (!pending || state.pendingMove !== pending) return;
 
     if (!pending.sourceAlbumId) {
       notify('Added to album. No source album was detected, so nothing was removed.', 'info');
       state.pendingMove = null;
+      stopMembershipMonitor();
+      return;
+    }
+
+    if (!targetAlbumId) {
       return;
     }
 
     if (pending.sourceAlbumId === targetAlbumId) {
       notify('Target album is the current album. Nothing was removed.', 'info');
       state.pendingMove = null;
+      stopMembershipMonitor();
+      return;
+    }
+
+    const idsToRemove = [...new Set((confirmedIds || []).filter(isUuid))];
+
+    if (idsToRemove.length === 0) {
+      notify('No asset IDs were confirmed for removal from the source album.', 'error');
+      state.pendingMove = null;
+      stopMembershipMonitor();
       return;
     }
 
     console.debug?.('[Immich Move] Removing assets from source album:', {
       sourceAlbumId: pending.sourceAlbumId,
       targetAlbumId,
-      confirmedIds,
-      confirmedCount: confirmedIds.length,
+      confirmedIds: idsToRemove,
+      confirmedCount: idsToRemove.length,
+      detectionReason,
     });
 
-    const removed = await removeAssetsFromAlbum(pending.sourceAlbumId, confirmedIds);
+    const removed = await removeAssetsFromAlbum(pending.sourceAlbumId, idsToRemove);
 
     state.pendingMove = null;
+    stopMembershipMonitor();
 
     if (removed) {
       resetSelectionCache('move completed');
 
-      notify(`Moved ${confirmedIds.length} asset${confirmedIds.length === 1 ? '' : 's'} to album.`, 'success');
+      notify(`Moved ${idsToRemove.length} asset${idsToRemove.length === 1 ? '' : 's'} to album.`, 'success');
 
       if (CONFIG.autoReloadAfterMove && isCurrentAlbumPage()) {
         // Give Immich and Firefox a moment to settle after the DELETE.
@@ -623,11 +709,11 @@
       for (const row of result) {
         if (!row) continue;
 
-        if (row.id && (row.success === true || row.error === 'duplicate')) {
+        if (row.id && (row.success === true || isDuplicateToken(row.error) || isDuplicateToken(row.message))) {
           ids.add(row.id);
         }
 
-        if (row.assetId && (row.success === true || row.error === 'duplicate')) {
+        if (row.assetId && (row.success === true || isDuplicateToken(row.error) || isDuplicateToken(row.message))) {
           ids.add(row.assetId);
         }
       }
@@ -637,11 +723,11 @@
       for (const row of result.results) {
         if (!row) continue;
 
-        if (row.id && (row.success === true || row.error === 'duplicate')) {
+        if (row.id && (row.success === true || isDuplicateToken(row.error) || isDuplicateToken(row.message))) {
           ids.add(row.id);
         }
 
-        if (row.assetId && (row.success === true || row.error === 'duplicate')) {
+        if (row.assetId && (row.success === true || isDuplicateToken(row.error) || isDuplicateToken(row.message))) {
           ids.add(row.assetId);
         }
       }
@@ -662,22 +748,72 @@
     return [...ids];
   }
 
-  function extractAlbumIdFromAssetEndpoint(rawUrl) {
-    try {
-      const url = new URL(rawUrl, window.location.origin);
-      const match = url.pathname.match(new RegExp(`/api/albums/(${CONFIG.uuidRegex})/assets$`, 'i'));
-      return match?.[1] || null;
-    } catch {
-      return null;
-    }
+  function isDuplicateToken(value) {
+    if (typeof value !== 'string') return false;
+    return /\bduplicate\b|\balready\s+exists?\b/i.test(value);
   }
 
-  function parseIdsFromRequestBody(bodyText) {
-    if (!bodyText) return [];
+  function isDuplicateAddFailure(result) {
+    if (!result) return false;
 
-    try {
-      const json = JSON.parse(bodyText);
+    if (Array.isArray(result)) {
+      if (result.length === 0) return false;
 
+      const duplicateRows = result.filter((row) => {
+        if (!row || typeof row !== 'object') return false;
+        return isDuplicateToken(row.error) || isDuplicateToken(row.message);
+      });
+
+      return duplicateRows.length > 0 && duplicateRows.length === result.length;
+    }
+
+    if (typeof result === 'object') {
+      if (isDuplicateToken(result.error) || isDuplicateToken(result.message)) {
+        return true;
+      }
+
+      if (Array.isArray(result.results) && result.results.length > 0) {
+        const duplicateRows = result.results.filter((row) => {
+          if (!row || typeof row !== 'object') return false;
+          return isDuplicateToken(row.error) || isDuplicateToken(row.message);
+        });
+
+        if (duplicateRows.length > 0 && duplicateRows.length === result.results.length) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function extractAlbumIdFromAssetEndpoint(rawUrl) {
+    const url = safeParseUrl(rawUrl);
+    if (!url) return null;
+
+    const match = url.pathname.match(
+      new RegExp(`/api/albums/(${CONFIG.uuidRegex})/assets(?:/)?$`, 'i'),
+    );
+
+    return match?.[1] || null;
+  }
+
+  function extractTargetAlbumIdFromAddRequest(requestInfo, parsedBody = undefined) {
+    const fromPath = extractAlbumIdFromAssetEndpoint(requestInfo.url);
+    if (fromPath) return fromPath;
+
+    const albumIds = parseAlbumIdsFromRequestBody(requestInfo.bodyText, parsedBody);
+    if (albumIds.length === 1) return albumIds[0];
+
+    return null;
+  }
+
+  function parseIdsFromRequestBody(bodyText, parsedBody = undefined) {
+    if (!bodyText && !parsedBody) return [];
+
+    const json = parsedBody === undefined ? parseJsonBody(bodyText) : parsedBody;
+
+    if (json) {
       if (Array.isArray(json?.ids)) return json.ids.filter(isUuid);
       if (Array.isArray(json?.assetIds)) return json.assetIds.filter(isUuid);
       if (Array.isArray(json?.assetIdsToAdd)) return json.assetIdsToAdd.filter(isUuid);
@@ -694,9 +830,50 @@
       );
 
       return [...new Set(nestedIds)];
+    }
+
+    const rawMatches = String(bodyText || '').match(new RegExp(CONFIG.uuidRegex, 'gi')) || [];
+    return [...new Set(rawMatches.filter(isUuid))];
+  }
+
+  function parseAlbumIdsFromRequestBody(bodyText, parsedBody = undefined) {
+    const json = parsedBody === undefined ? parseJsonBody(bodyText) : parsedBody;
+    if (!json || typeof json !== 'object') return [];
+
+    const ids = new Set();
+
+    if (Array.isArray(json.albumIds)) {
+      for (const id of json.albumIds) {
+        if (isUuid(id)) ids.add(id);
+      }
+    }
+
+    if (isUuid(json.albumId)) {
+      ids.add(json.albumId);
+    }
+
+    if (json.album && isUuid(json.album.id)) {
+      ids.add(json.album.id);
+    }
+
+    return [...ids];
+  }
+
+  function parseJsonBody(bodyText) {
+    if (!bodyText || typeof bodyText !== 'string') return null;
+
+    try {
+      return JSON.parse(bodyText);
     } catch {
-      const rawMatches = String(bodyText).match(new RegExp(CONFIG.uuidRegex, 'gi')) || [];
-      return [...new Set(rawMatches.filter(isUuid))];
+      return null;
+    }
+  }
+
+  function safeParseUrl(rawUrl) {
+    try {
+      return new URL(rawUrl, window.location.origin);
+    } catch {
+      return null;
     }
   }
 
@@ -982,15 +1159,20 @@
     let response;
 
     // Current documented shape.
-    response = await fetch(url, {
-      method: 'DELETE',
-      credentials: 'same-origin',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ ids: assetIds }),
-    });
+    try {
+      response = await fetch(url, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ids: assetIds }),
+      });
+    } catch (error) {
+      console.warn('[Immich Move] DELETE with { ids } request failed:', error);
+      return false;
+    }
 
     if (response.ok) return true;
 
@@ -999,15 +1181,20 @@
     console.warn('[Immich Move] DELETE with { ids } failed:', response.status, firstError);
 
     // Compatibility fallback for older/client-internal shapes.
-    response = await fetch(url, {
-      method: 'DELETE',
-      credentials: 'same-origin',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ assetIds }),
-    });
+    try {
+      response = await fetch(url, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ assetIds }),
+      });
+    } catch (error) {
+      console.warn('[Immich Move] DELETE with { assetIds } request failed:', error);
+      return false;
+    }
 
     if (response.ok) return true;
 
@@ -1115,17 +1302,165 @@
       notify('No current album detected. The asset will be added to the target album, but cannot be removed from a source album.', 'info');
     }
 
+    const probeAssetId = assetIds[0] || null;
+    let baselineAlbumIds = [];
+
+    if (probeAssetId) {
+      baselineAlbumIds = await getAlbumIdsForAsset(probeAssetId);
+    }
+
     state.pendingMove = {
       assetIds,
       sourceAlbumId,
       startedAt: Date.now(),
+      probeAssetId,
+      baselineAlbumIds,
+      membershipCheckInFlight: false,
     };
 
     const opened = await openNativeAddToAlbumModal();
 
     if (!opened) {
       state.pendingMove = null;
+      stopMembershipMonitor();
       notify('Could not find Immich’s “Add to album” action. Open the selection menu and try again, or adjust the selector terms in the userscript.', 'error');
+      return;
+    }
+
+    startMembershipMonitor();
+  }
+
+  function startMembershipMonitor() {
+    stopMembershipMonitor();
+
+    state.membershipMonitorTimer = window.setInterval(() => {
+      void checkPendingMoveMembershipFallback();
+    }, CONFIG.membershipPollMs);
+
+    // Also run one immediate check shortly after opening the modal.
+    window.setTimeout(() => {
+      void checkPendingMoveMembershipFallback();
+    }, 1200);
+  }
+
+  function stopMembershipMonitor() {
+    if (!state.membershipMonitorTimer) return;
+    window.clearInterval(state.membershipMonitorTimer);
+    state.membershipMonitorTimer = null;
+  }
+
+  async function checkPendingMoveMembershipFallback() {
+    const pending = state.pendingMove;
+    if (!pending) {
+      stopMembershipMonitor();
+      return;
+    }
+
+    if (pending.membershipCheckInFlight) return;
+
+    const ageMs = Date.now() - (pending.startedAt || Date.now());
+    if (ageMs > CONFIG.membershipMonitorTimeoutMs) {
+      console.debug?.('[Immich Move] Membership monitor timed out; clearing pending move.');
+      state.pendingMove = null;
+      stopMembershipMonitor();
+      return;
+    }
+
+    const probeAssetId = pending.probeAssetId;
+    if (!probeAssetId) return;
+
+    pending.membershipCheckInFlight = true;
+
+    try {
+      const currentAlbumIds = await getAlbumIdsForAsset(probeAssetId);
+      if (state.pendingMove !== pending) return;
+      if (currentAlbumIds.length === 0) return;
+
+      const baseline = new Set((pending.baselineAlbumIds || []).filter(isUuid));
+      const newlyAddedAlbumIds = currentAlbumIds.filter((id) => isUuid(id) && !baseline.has(id));
+
+      if (newlyAddedAlbumIds.length === 0) return;
+
+      let targetAlbumId = null;
+
+      if (newlyAddedAlbumIds.length === 1) {
+        targetAlbumId = newlyAddedAlbumIds[0];
+      } else if (pending.sourceAlbumId) {
+        const withoutSource = newlyAddedAlbumIds.filter((id) => id !== pending.sourceAlbumId);
+        if (withoutSource.length === 1) {
+          targetAlbumId = withoutSource[0];
+        }
+      }
+
+      if (!targetAlbumId) {
+        console.debug?.('[Immich Move] Membership fallback found multiple new albums; waiting for clearer signal.', {
+          probeAssetId,
+          baselineAlbumIds: pending.baselineAlbumIds,
+          currentAlbumIds,
+          newlyAddedAlbumIds,
+        });
+        return;
+      }
+
+      console.debug?.('[Immich Move] Membership fallback detected target album:', {
+        probeAssetId,
+        sourceAlbumId: pending.sourceAlbumId,
+        targetAlbumId,
+        baselineAlbumIds: pending.baselineAlbumIds,
+        currentAlbumIds,
+      });
+
+      await finalizeMoveAfterTargetDetected({
+        pending,
+        targetAlbumId,
+        confirmedIds: pending.assetIds,
+        detectionReason: 'membership fallback',
+      });
+    } catch (error) {
+      console.debug?.('[Immich Move] Membership fallback check failed:', error);
+    } finally {
+      if (state.pendingMove === pending) {
+        pending.membershipCheckInFlight = false;
+      }
+    }
+  }
+
+  async function getAlbumIdsForAsset(assetId) {
+    if (!isUuid(assetId)) return [];
+
+    const url = `/api/albums?assetId=${encodeURIComponent(assetId)}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        console.debug?.('[Immich Move] Failed to fetch asset album memberships:', response.status, text);
+        return [];
+      }
+
+      const json = await response.json().catch(() => null);
+
+      if (!Array.isArray(json)) {
+        return [];
+      }
+
+      const ids = new Set();
+      for (const row of json) {
+        const id = row?.id;
+        if (isUuid(id)) ids.add(id);
+      }
+
+      return [...ids];
+    } catch (error) {
+      console.debug?.('[Immich Move] Error while fetching asset album memberships:', error);
+      return [];
     }
   }
 
