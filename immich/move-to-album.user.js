@@ -2,7 +2,7 @@
 // @name         Immich Move to Album
 // @namespace    https://immich.app/
 // @icon         data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACIUlEQVQ4T3VTv2/TUBC+e47THxSpK5v7L5iAuuVZYurUslJRS/wBSSREBojiioGRZEVCpRsDUoMC7QKqm4GFlgbEWtVBlVigsUBQkcTvuGcR10nDSZbt83ff3fe9M8KE6MucRKCqIpL6s0D0+VbP+AeNcTiOJ87komVQ73gScYTCmfH3NVkSFwgG0nYVwcYkAiAsZlsH9QsE37zXrkHqMQNCheBnj95sTp20NoDASoNNIZbhnqoBdwDEOi59qGHX27FUNBgZmTUHcPqlNPv56RoSLQ9JxA21ImyxNXxHIRzsVptbSkECGumI6E63qg4QrRFCkC3DOqlzecjm4mm12eXk/IguASEN6FlWZBqXHy7t9eTVQwFQM8rkMTaRxQaG+L3SZEGpUFS7Y+b2Arjitz0M9Rd9MtPlnkx3T2R0K692FZDkcYKP6lLprpmTbF5hKjNnvXuAnSGQduzjdHedjyV8ZROz/X7hibnw8gUs8PFRPGKagLbtIpNWedRYqh6dq31AsxTvweKjM6v/J9odFutcf+7E/ZS7X+NHBkIbFHQgIwIYDJhE8KUa4DTCmODa+u+CokiDkxBoFN/nb+nOI7twDqAi5Bv1/xIgoL/v3ObODJwUIkUgPZr/Cb8O0xJ0zdH1yko400kWJ8UTsEsOOM+D5F+Y5EMsQ65aY1Mkxf8MHZ3P9n64CCJPfKyKZuvxLry96YKh8kBGGyDa1OYNq/4CqB/zUEwubakAAAAASUVORK5CYII=
-// @version      1.0.1
+// @version      1.0.2
 // @description  Move selected/current Immich assets to another album using Immich's native add-to-album modal, then remove them from the current album.
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
@@ -1314,6 +1314,8 @@
   }
 
   function clickLikeUser(el) {
+    if (!el) return false;
+
     const rect = el.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
@@ -1321,18 +1323,49 @@
     const eventOptions = {
       bubbles: true,
       cancelable: true,
-      view: window,
+      composed: true,
       clientX: x,
       clientY: y,
       button: 0,
       buttons: 1,
     };
 
-    el.dispatchEvent(new PointerEvent('pointerdown', eventOptions));
-    el.dispatchEvent(new MouseEvent('mousedown', eventOptions));
-    el.dispatchEvent(new PointerEvent('pointerup', { ...eventOptions, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('mouseup', { ...eventOptions, buttons: 0 }));
-    el.dispatchEvent(new MouseEvent('click', { ...eventOptions, buttons: 0 }));
+    const pointerOptions = {
+      ...eventOptions,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true,
+    };
+
+    const dispatch = (EventCtor, type, options) => {
+      try {
+        el.dispatchEvent(new EventCtor(type, options));
+        return true;
+      } catch (error) {
+        console.debug?.(`[Immich Move] Synthetic ${type} failed:`, error);
+        return false;
+      }
+    };
+
+    // Firefox userscript sandboxes can reject UIEventInit.view values across realms.
+    // Build events without `view` and gracefully fall back to native click.
+    const pointerDownSent = typeof PointerEvent === 'function'
+      ? dispatch(PointerEvent, 'pointerdown', pointerOptions)
+      : false;
+    const mouseDownSent = dispatch(MouseEvent, 'mousedown', eventOptions);
+
+    if (typeof PointerEvent === 'function') {
+      dispatch(PointerEvent, 'pointerup', { ...pointerOptions, buttons: 0 });
+    }
+
+    dispatch(MouseEvent, 'mouseup', { ...eventOptions, buttons: 0 });
+    const clickSent = dispatch(MouseEvent, 'click', { ...eventOptions, buttons: 0 });
+
+    if (!pointerDownSent && !mouseDownSent && !clickSent) {
+      el.click?.();
+    }
+
+    return true;
   }
 
 
