@@ -63,7 +63,7 @@ This popup is where you enter your Immich URL/IP pattern.
 
 ### Immich Move to Album
 
-- File: `immich/move-to-album.js`
+- File: `immich/move-to-album.user.js`
 - Tested Immich version: 2.7.5
 - Raw install link: <https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/move-to-album.user.js>
 - What it does: moves selected/current asset(s) to another album via Immich's native add-to-album modal, then removes them from the current album.
@@ -71,7 +71,7 @@ This popup is where you enter your Immich URL/IP pattern.
 
 ### Immich Quick Rotate and Save
 
-- File: `immich/rotate.js`
+- File: `immich/rotate.user.js`
 - Tested Immich version: 2.7.5
 - Raw install link: <https://raw.githubusercontent.com/AnonTester/user-scripts/main/immich/rotate.user.js>
 - What it does: rotates the current photo and saves immediately.
