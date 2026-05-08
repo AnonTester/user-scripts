@@ -2,7 +2,7 @@
 // @name         Immich Move to Album
 // @namespace    https://immich.app/
 // @icon         data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACIUlEQVQ4T3VTv2/TUBC+e47THxSpK5v7L5iAuuVZYurUslJRS/wBSSREBojiioGRZEVCpRsDUoMC7QKqm4GFlgbEWtVBlVigsUBQkcTvuGcR10nDSZbt83ff3fe9M8KE6MucRKCqIpL6s0D0+VbP+AeNcTiOJ87komVQ73gScYTCmfH3NVkSFwgG0nYVwcYkAiAsZlsH9QsE37zXrkHqMQNCheBnj95sTp20NoDASoNNIZbhnqoBdwDEOi59qGHX27FUNBgZmTUHcPqlNPv56RoSLQ9JxA21ImyxNXxHIRzsVptbSkECGumI6E63qg4QrRFCkC3DOqlzecjm4mm12eXk/IguASEN6FlWZBqXHy7t9eTVQwFQM8rkMTaRxQaG+L3SZEGpUFS7Y+b2Arjitz0M9Rd9MtPlnkx3T2R0K692FZDkcYKP6lLprpmTbF5hKjNnvXuAnSGQduzjdHedjyV8ZROz/X7hibnw8gUs8PFRPGKagLbtIpNWedRYqh6dq31AsxTvweKjM6v/J9odFutcf+7E/ZS7X+NHBkIbFHQgIwIYDJhE8KUa4DTCmODa+u+CokiDkxBoFN/nb+nOI7twDqAi5Bv1/xIgoL/v3ObODJwUIkUgPZr/Cb8O0xJ0zdH1yko400kWJ8UTsEsOOM+D5F+Y5EMsQ65aY1Mkxf8MHZ3P9n64CCJPfKyKZuvxLry96YKh8kBGGyDa1OYNq/4CqB/zUEwubakAAAAASUVORK5CYII=
-// @version      1.0.8
+// @version      1.1.0
 // @description  Move selected/current Immich assets to another album using Immich's native add-to-album modal, then remove them from the current album.
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
@@ -119,27 +119,10 @@
   const CONFIG = {
     keyboardShortcut: 'm',
 
-    // UI labels searched in buttons/menu items.
-    addToAlbumTerms: [
-      'add to album',
-      'add to albums',
-      'album',
-    ],
-
-    moreButtonTerms: [
-      'more',
-      'more options',
-      'actions',
-      'menu',
-      'options',
-      '...',
-    ],
-
     // UUID-style IDs used by Immich assets/albums.
     uuidRegex: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',
 
     pollMs: 500,
-    autoReloadAfterMove: true,
     membershipPollMs: 900,
     membershipMonitorTimeoutMs: 90_000,
   };
@@ -151,13 +134,9 @@
 
     learnedAlbumId: null,
     learnedAlbumAt: 0,
-    lastLearnedAlbumLogKey: '',
-    lastLearnedAlbumLogAt: 0,
 
     selectedAssetIds: new Set(),
     selectionCacheViewKey: null,
-    lastSelectionSeenAt: 0,
-    lastScrollAt: 0,
     membershipMonitorTimer: null,
     recentDuplicateToastAt: 0,
   };
@@ -166,14 +145,6 @@
   patchFetch();
   installUi();
   installKeyboardShortcut();
-
-  window.addEventListener(
-    'scroll',
-    () => {
-      state.lastScrollAt = Date.now();
-    },
-    true,
-  );
 
   document.addEventListener(
     'pointerdown',
@@ -187,14 +158,12 @@
 
       if (!clearButton) return;
 
-      console.debug?.('[Immich Move] Clear-selection button detected; clearing cache.');
-
-      resetSelectionCache('Immich clear-selection button clicked');
+      resetSelectionCache();
       refreshButton();
 
       // Run again after Immich updates its own UI.
       window.setTimeout(() => {
-        resetSelectionCache('Immich clear-selection button clicked after UI update');
+        resetSelectionCache();
         refreshButton();
       }, 250);
     },
@@ -210,13 +179,12 @@
 
       window.setTimeout(() => {
         const visibleSelectedIds = getVisibleSelectedAssetIds();
+        const toolbarSelectionCount = getImmichToolbarSelectionCount();
 
         if (
-          visibleSelectedIds.length === 0 &&
-          !isImmichSelectionModeLikelyActive() &&
-          Date.now() - state.lastScrollAt > 1200
+          !isSelectionCacheStillActive(visibleSelectedIds.length, toolbarSelectionCount)
         ) {
-          resetSelectionCache('selection cleared after click');
+          resetSelectionCache();
           refreshButton();
         }
       }, 300);
@@ -353,13 +321,13 @@
       try {
         learnAlbumContextFromRequest(requestInfo, response.clone());
       } catch (error) {
-        console.warn('[Immich Move] Failed while learning album context:', error);
+        console.error('[Immich Move] Failed while learning album context:', error);
       }
 
       try {
         await maybeHandleAlbumAddResponse(requestInfo, response.clone());
       } catch (error) {
-        console.warn('[Immich Move] Failed while handling album-add response:', error);
+        console.error('[Immich Move] Failed while handling album-add response:', error);
       }
 
       return response;
@@ -416,7 +384,7 @@
         try {
           await maybeHandleAlbumAddResponse(requestInfo, responseLike);
         } catch (error) {
-          console.warn('[Immich Move] Failed while handling XHR album-add response:', error);
+          console.error('[Immich Move] Failed while handling XHR album-add response:', error);
         }
       });
 
@@ -464,7 +432,7 @@
     const albumIdFromUrl = extractAlbumIdFromAnyAlbumEndpoint(requestInfo.url);
 
     if (albumIdFromUrl && requestInfo.method === 'GET') {
-      rememberSourceAlbum(albumIdFromUrl, 'GET album endpoint');
+      rememberSourceAlbum(albumIdFromUrl);
       return;
     }
 
@@ -477,34 +445,21 @@
       const json = await response.json();
 
       if (json?.id && isUuid(json.id)) {
-        rememberSourceAlbum(json.id, 'album JSON response');
+        rememberSourceAlbum(json.id);
       }
     } catch {
       // Ignore non-JSON responses.
     }
   }
 
-  function rememberSourceAlbum(albumId, reason = '') {
+  function rememberSourceAlbum(albumId) {
     if (!albumId || !isUuid(albumId)) return;
 
     const now = Date.now();
-    const previousAlbumId = state.learnedAlbumId;
 
     state.learnedAlbumId = albumId;
     state.learnedAlbumAt = now;
     state.currentAlbumId = albumId;
-
-    const logKey = `${albumId}|${reason}`;
-    const shouldLog =
-      previousAlbumId !== albumId ||
-      state.lastLearnedAlbumLogKey !== logKey ||
-      now - state.lastLearnedAlbumLogAt > 15000;
-
-    if (shouldLog) {
-      console.debug?.('[Immich Move] Learned source album:', albumId, reason);
-      state.lastLearnedAlbumLogKey = logKey;
-      state.lastLearnedAlbumLogAt = now;
-    }
   }
 
   function extractAlbumIdFromAnyAlbumEndpoint(rawUrl) {
@@ -531,27 +486,9 @@
     const targetAlbumId = extractTargetAlbumIdFromAddRequest(requestInfo, parsedBody, pending);
 
     if (!targetAlbumId) {
-      const url = safeParseUrl(requestInfo.url);
-      if (url?.pathname.includes('/api/albums')) {
-        console.debug?.('[Immich Move] Pending move ignored: album add request had no target album ID.', {
-          method: requestInfo.method,
-          url: requestInfo.url,
-          bodyText: requestInfo.bodyText,
-        });
-      }
       return;
     }
 
-    console.debug?.('[Immich Move] Saw album asset add candidate:', {
-      method: requestInfo.method,
-      url: requestInfo.url,
-      targetAlbumId,
-      sourceAlbumId: pending.sourceAlbumId,
-      pendingAssetCount: pending.assetIds.length,
-      bodyText: requestInfo.bodyText,
-      status: response.status,
-      ok: response.ok,
-    });
 
     const requestIds = parseIdsFromRequestBody(requestInfo.bodyText, parsedBody);
 
@@ -563,21 +500,13 @@
       // The userscript's DOM-based selection detection may miss virtualized/off-screen assets.
       relevantIds = [...new Set(requestIds)];
 
-      console.debug?.('[Immich Move] Using asset IDs from Immich add request:', {
-        requestIdCount: relevantIds.length,
-        pendingIdCount: pending.assetIds.length,
-      });
     } else {
       // Fallback only if the request body cannot be inspected.
       relevantIds = [...new Set(pending.assetIds)];
 
-      console.debug?.('[Immich Move] Could not parse add request body; using pending selected assets.', {
-        relevantIds,
-      });
     }
 
     if (relevantIds.length === 0) {
-      console.debug?.('[Immich Move] No relevant asset IDs found for album add request.');
       return;
     }
 
@@ -589,7 +518,6 @@
       addResult = await response.json();
       addResultParsed = true;
 
-      console.debug?.('[Immich Move] Album add response JSON:', addResult);
     } catch {
       // Ignore parse failures; we'll fall back to HTTP status + request IDs below.
     }
@@ -603,16 +531,17 @@
       return;
     }
 
-    if (duplicateOnlyFailure) {
-      console.debug?.('[Immich Move] Add request reported duplicate/already-exists; continuing with source removal.');
-    }
-
     if (addResultParsed) {
-      const successful = extractSuccessfulAssetIdsFromAddResponse(addResult);
+      const failedIds = extractExplicitlyFailedAssetIdsFromAddResponse(addResult);
 
-      if (successful.length > 0) {
-        // Intersect against the actual Immich request IDs, not the userscript's pending IDs.
-        confirmedIds = relevantIds.filter((id) => successful.includes(id));
+      if (failedIds.length > 0) {
+        const failedSet = new Set(failedIds);
+        confirmedIds = relevantIds.filter((id) => !failedSet.has(id));
+
+      } else if (response.ok) {
+        // Some Immich responses only list newly-added IDs and omit duplicates.
+        // On HTTP success, treat request IDs as confirmed unless specific IDs failed.
+        confirmedIds = relevantIds;
       }
     }
 
@@ -620,10 +549,6 @@
       // Duplicate responses can omit per-asset success rows, but we still want
       // to remove those requested assets from the source album.
       confirmedIds = relevantIds;
-    }
-
-    if (!addResultParsed && response.ok) {
-      console.debug?.('[Immich Move] Album add response was not JSON or could not be parsed; treating HTTP success as success.');
     }
 
     if (confirmedIds.length === 0) {
@@ -637,7 +562,6 @@
       pending,
       targetAlbumId,
       confirmedIds,
-      detectionReason: 'intercepted album-add response',
     });
   }
 
@@ -645,7 +569,6 @@
     pending,
     targetAlbumId,
     confirmedIds,
-    detectionReason = '',
   }) {
     if (!pending || state.pendingMove !== pending) return;
 
@@ -676,13 +599,11 @@
       return;
     }
 
-    console.debug?.('[Immich Move] Removing assets from source album:', {
-      sourceAlbumId: pending.sourceAlbumId,
-      targetAlbumId,
-      confirmedIds: idsToRemove,
-      confirmedCount: idsToRemove.length,
-      detectionReason,
-    });
+    notify(
+      `Move in progress. Removing ${idsToRemove.length} asset${idsToRemove.length === 1 ? '' : 's'} from source album...`,
+      'info',
+      { persist: true, spinner: true },
+    );
 
     const removed = await removeAssetsFromAlbum(pending.sourceAlbumId, idsToRemove);
 
@@ -690,70 +611,69 @@
     stopMembershipMonitor();
 
     if (removed) {
-      resetSelectionCache('move completed');
+      clearImmichSelectionUiAfterMove();
+      resetSelectionCache();
 
-      notify(`Moved ${idsToRemove.length} asset${idsToRemove.length === 1 ? '' : 's'} to album.`, 'success');
-
-      if (CONFIG.autoReloadAfterMove && isCurrentAlbumPage()) {
-        // Give Immich and Firefox a moment to settle after the DELETE.
-        // This also reduces the harmless "NetworkError when attempting to fetch resource"
-        // caused by reloading while Immich still has in-flight requests.
-        window.setTimeout(() => window.location.reload(), 1500);
-      }
+      const successMessage = `Moved ${idsToRemove.length} asset${idsToRemove.length === 1 ? '' : 's'} to album.`;
+      notify(successMessage, 'success');
     } else {
       notify('Assets were added to the target album, but removal from the current album failed.', 'error');
     }
   }
 
-  function extractSuccessfulAssetIdsFromAddResponse(result) {
-    const ids = new Set();
+  function extractExplicitlyFailedAssetIdsFromAddResponse(result) {
+    const failed = new Set();
+    const rows = [];
 
     if (Array.isArray(result)) {
-      for (const row of result) {
-        if (!row) continue;
-
-        if (row.id && (row.success === true || isDuplicateToken(row.error) || isDuplicateToken(row.message))) {
-          ids.add(row.id);
-        }
-
-        if (row.assetId && (row.success === true || isDuplicateToken(row.error) || isDuplicateToken(row.message))) {
-          ids.add(row.assetId);
-        }
-      }
+      rows.push(...result);
     }
 
     if (Array.isArray(result?.results)) {
-      for (const row of result.results) {
-        if (!row) continue;
+      rows.push(...result.results);
+    }
 
-        if (row.id && (row.success === true || isDuplicateToken(row.error) || isDuplicateToken(row.message))) {
-          ids.add(row.id);
-        }
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
 
-        if (row.assetId && (row.success === true || isDuplicateToken(row.error) || isDuplicateToken(row.message))) {
-          ids.add(row.assetId);
-        }
+      const id = isUuid(row.id)
+        ? row.id
+        : (isUuid(row.assetId) ? row.assetId : null);
+
+      if (!id) continue;
+
+      const message = [
+        typeof row.error === 'string' ? row.error : '',
+        typeof row.message === 'string' ? row.message : '',
+        typeof row.reason === 'string' ? row.reason : '',
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+
+      if (row.success === false) {
+        failed.add(id);
+        continue;
+      }
+
+      if (!message) continue;
+      if (isDuplicateToken(message)) continue;
+      if (isLikelyFailureToken(message)) {
+        failed.add(id);
       }
     }
 
-    if (Array.isArray(result?.ids)) {
-      for (const id of result.ids) {
-        if (isUuid(id)) ids.add(id);
-      }
-    }
-
-    if (Array.isArray(result?.assetIds)) {
-      for (const id of result.assetIds) {
-        if (isUuid(id)) ids.add(id);
-      }
-    }
-
-    return [...ids];
+    return [...failed];
   }
 
   function isDuplicateToken(value) {
     if (typeof value !== 'string') return false;
     return /\bduplicate\b|\balready\s+exists?\b/i.test(value);
+  }
+
+  function isLikelyFailureToken(value) {
+    if (typeof value !== 'string') return false;
+    return /\b(fail(?:ed|ure)?|error|invalid|forbidden|denied|cannot|unable|not\s+found|bad\s+request)\b/i.test(value);
   }
 
   function isDuplicateAddFailure(result) {
@@ -835,13 +755,6 @@
       return albumIds[0];
     }
 
-    console.debug?.('[Immich Move] Could not disambiguate target album from request body.', {
-      sourceAlbumId,
-      albumIds,
-      baselineAlbumIds: pending?.baselineAlbumIds || [],
-      url: requestInfo.url,
-      bodyText: requestInfo.bodyText,
-    });
 
     return null;
   }
@@ -919,22 +832,22 @@
     return `${location.pathname}${location.search}`;
   }
 
-  function resetSelectionCache(reason = '') {
+  function resetSelectionCache() {
     state.selectedAssetIds.clear();
     state.lastKnownAssetIds = [];
     state.selectionCacheViewKey = getViewKey();
-
-    console.debug?.('[Immich Move] Selection cache reset:', reason);
   }
 
   function updateSelectionCacheFromDom() {
     const viewKey = getViewKey();
 
     if (state.selectionCacheViewKey !== viewKey) {
-      resetSelectionCache('view changed');
+      resetSelectionCache();
     }
 
-    const visibleAssetIds = getVisibleAssetIds();
+    const visibleAssetIds = getVisibleAssetRoots()
+      .map((root) => getPrimaryAssetIdFromElement(root))
+      .filter((id) => isUuid(id));
     const visibleSelectedIds = getVisibleSelectedAssetIds();
 
     const visibleSelectedSet = new Set(visibleSelectedIds);
@@ -942,10 +855,6 @@
     // Add currently visible selected assets.
     for (const id of visibleSelectedIds) {
       state.selectedAssetIds.add(id);
-    }
-
-    if (visibleSelectedIds.length > 0) {
-      state.lastSelectionSeenAt = Date.now();
     }
 
     // Reconcile visible unselected cards.
@@ -956,22 +865,17 @@
       }
     }
 
-    // Clear immediately when Immich has exited selection mode.
-    // Keep the cache only during short scroll/virtualization gaps.
+    // Clear immediately when no selected cards are visible and toolbar
+    // no longer reports selected items.
     if (state.selectedAssetIds.size > 0) {
-      const visibleSelectedIds = getVisibleSelectedAssetIds();
       const toolbarSelectionCount = getImmichToolbarSelectionCount();
+      const selectionStillActive = isSelectionCacheStillActive(
+        visibleSelectedIds.length,
+        toolbarSelectionCount,
+      );
 
-      const definitelyCleared =
-        visibleSelectedIds.length === 0 &&
-        toolbarSelectionCount === 0;
-
-      const selectionModeEnded =
-        !isImmichSelectionModeLikelyActive() &&
-        Date.now() - state.lastScrollAt > 1200;
-
-      if (definitelyCleared || selectionModeEnded) {
-        resetSelectionCache(definitelyCleared ? 'toolbar says zero selected' : 'selection mode ended');
+      if (!selectionStillActive) {
+        resetSelectionCache();
       }
     }
 
@@ -1009,22 +913,6 @@
     }
 
     return [...selected];
-  }
-
-  function getVisibleAssetIds() {
-    const ids = new Set();
-
-    const roots = getVisibleAssetRoots();
-
-    for (const root of roots) {
-      const id = getPrimaryAssetIdFromElement(root);
-
-      if (id) {
-        ids.add(id);
-      }
-    }
-
-    return [...ids];
   }
 
   function getVisibleAssetRoots() {
@@ -1134,58 +1022,9 @@
     return null;
   }
 
-  function isImmichSelectionModeLikelyActive() {
-    const visibleSelectedIds = getVisibleSelectedAssetIds();
-
-    if (visibleSelectedIds.length > 0) {
-      return true;
-    }
-
-    const toolbarSelectionCount = getImmichToolbarSelectionCount();
-
-    if (toolbarSelectionCount === 0) {
-      return false;
-    }
-
-    if (toolbarSelectionCount && toolbarSelectionCount > 0) {
-      return true;
-    }
-
-    const toolbarText = normalizeText(
-      [
-        ...document.querySelectorAll(
-          [
-            'header',
-            'nav',
-            '[role="toolbar"]',
-            '[data-testid*="toolbar"]',
-            '[class*="toolbar"]',
-            '[class*="Toolbar"]',
-          ].join(','),
-        ),
-      ]
-        .filter(isVisible)
-        .map((el) => el.textContent || '')
-        .join(' '),
-    );
-
-    // Only explicit selection wording should keep the cache alive.
-    // Do not use generic action words like delete/share/favorite here.
-    if (
-      /\b\d+\s+(selected|assets selected|photos selected|items selected)\b/.test(toolbarText) ||
-      /\bselected\s+\d+\b/.test(toolbarText) ||
-      toolbarText.includes('selected')
-    ) {
-      return true;
-    }
-
-    // Preserve cache only during actual scroll virtualization gaps.
-    const recentlyScrolling = Date.now() - state.lastScrollAt < 1200;
-
-    if (recentlyScrolling && Date.now() - state.lastSelectionSeenAt < 5000) {
-      return true;
-    }
-
+  function isSelectionCacheStillActive(visibleSelectedCount, toolbarSelectionCount) {
+    if (visibleSelectedCount > 0) return true;
+    if (toolbarSelectionCount && toolbarSelectionCount > 0) return true;
     return false;
   }
 
@@ -1195,131 +1034,252 @@
     const ids = [...new Set(assetIds.filter(isUuid))];
     if (ids.length === 0) return false;
 
-    const url = `/api/albums/${albumId}/assets`;
-    let remaining = [...ids];
-
-    for (const payloadKey of ['ids', 'assetIds']) {
-      if (remaining.length === 0) break;
-
-      await removeAssetsFromAlbumOnce(url, payloadKey, remaining);
-      await sleep(160);
-
-      remaining = await getRemainingAssetIdsInAlbum(albumId, remaining);
-
-      if (remaining.length > 0) {
-        console.debug?.('[Immich Move] Batch removal left assets in source album; retrying.', {
-          albumId,
-          payloadKey,
-          remainingCount: remaining.length,
-          remainingIds: remaining,
-        });
-      }
+    const currentAlbumId = getCurrentAlbumIdFromUrl();
+    if (currentAlbumId !== albumId) {
+      return false;
     }
 
-    if (remaining.length > 0) {
-      const unresolved = [];
+    return removeAssetsFromAlbumViaNativeUi(ids);
+  }
 
-      for (const assetId of remaining) {
-        let removed = false;
+  async function removeAssetsFromAlbumViaNativeUi(ids) {
+    const opened = await openNativeRemoveFromAlbumAction();
+    if (!opened) return false;
 
-        for (const payloadKey of ['ids', 'assetIds']) {
-          await removeAssetsFromAlbumOnce(url, payloadKey, [assetId]);
-          await sleep(110);
+    const confirmed = await confirmNativeRemoveIfPrompted();
+    if (!confirmed) return false;
 
-          const stillInAlbum = await getRemainingAssetIdsInAlbum(albumId, [assetId]);
+    // Native dialog confirmation completed. Immich handles the UI/state update.
+    await sleep(Math.min(600, Math.max(180, ids.length * 35)));
+    return true;
+  }
 
-          if (stillInAlbum.length === 0) {
-            removed = true;
-            break;
-          }
-        }
-
-        if (!removed) {
-          unresolved.push(assetId);
-        }
-      }
-
-      remaining = unresolved;
+  async function openNativeRemoveFromAlbumAction() {
+    let removeControl = findNativeRemoveFromAlbumControl();
+    if (removeControl) {
+      clickLikeUser(removeControl);
+      await sleep(260);
+      return true;
     }
 
-    if (remaining.length === 0) return true;
+    const moreTriggers = findNativeMoreMenuTriggers();
 
-    console.warn('[Immich Move] Could not remove all assets from source album.', {
-      albumId,
-      requestedCount: ids.length,
-      unresolvedCount: remaining.length,
-      unresolvedIds: remaining,
-    });
+    for (const trigger of moreTriggers) {
+      clickLikeUser(trigger);
+      await sleep(320);
+
+      removeControl = findNativeRemoveFromAlbumControl();
+      if (removeControl) {
+        clickLikeUser(removeControl);
+        await sleep(260);
+        return true;
+      }
+
+      dispatchEscapeForSelectionClear();
+      await sleep(100);
+    }
 
     return false;
   }
 
-  async function removeAssetsFromAlbumOnce(url, payloadKey, ids) {
-    let response;
+  async function confirmNativeRemoveIfPrompted() {
+    const initialWaitUntil = Date.now() + 1600;
+    let sawRemovalDialog = false;
 
-    try {
-      response = await fetch(url, {
-        method: 'DELETE',
-        credentials: 'same-origin',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ [payloadKey]: ids }),
-      });
-    } catch (error) {
-      console.warn(`[Immich Move] DELETE with { ${payloadKey} } request failed:`, error);
-      return null;
+    // Wait a short moment for the dialog to appear.
+    while (Date.now() < initialWaitUntil) {
+      const dialog = getVisibleNativeRemovalDialog();
+      if (dialog) {
+        sawRemovalDialog = true;
+        break;
+      }
+      await sleep(90);
     }
 
-    if (response.ok) {
-      return response;
+    // No dialog appeared; some Immich builds may remove immediately.
+    if (!sawRemovalDialog) {
+      return true;
     }
 
-    const text = await response.text().catch(() => '');
-    console.warn(`[Immich Move] DELETE with { ${payloadKey} } failed:`, response.status, text);
+    const deadline = Date.now() + 5200;
 
-    return response;
-  }
-
-  async function getRemainingAssetIdsInAlbum(albumId, assetIds) {
-    if (!isUuid(albumId)) return [];
-
-    const ids = [...new Set((assetIds || []).filter(isUuid))];
-    if (ids.length === 0) return [];
-
-    const remaining = [];
-    const unknown = [];
-
-    for (const assetId of ids) {
-      let memberships = await getAlbumIdsForAsset(assetId, { strict: true });
-
-      if (memberships === null) {
-        // A short retry reduces false negatives from transient request failures.
-        await sleep(130);
-        memberships = await getAlbumIdsForAsset(assetId, { strict: true });
+    while (Date.now() < deadline) {
+      const dialog = getVisibleNativeRemovalDialog();
+      if (!dialog) {
+        // Dialog disappeared after we saw it; assume it was confirmed.
+        return true;
       }
 
-      if (memberships === null) {
-        unknown.push(assetId);
-        remaining.push(assetId);
+      const confirmButton = findNativeRemoveConfirmControl(dialog);
+      if (confirmButton) {
+        clickLikeUser(confirmButton);
+        // Extra fallback for modal/button implementations that only respect native click.
+        confirmButton.click?.();
+
+        await sleep(180);
         continue;
       }
 
-      if (memberships.includes(albumId)) {
-        remaining.push(assetId);
+      await sleep(130);
+    }
+
+    return false;
+  }
+
+  function findNativeRemoveFromAlbumControl() {
+    const controls = getVisibleClickableElements();
+
+    return controls.find((el) => {
+      if (el.id === 'immich-move-to-album-button') return false;
+
+      const name = getControlName(el);
+      const testId = normalizeText(el.getAttribute('data-testid') || '');
+
+      return (
+        name.includes('remove from album') ||
+        name.includes('remove from current album') ||
+        name.includes('remove from this album') ||
+        name.includes('remove selected from album') ||
+        name.includes('remove selected assets from album') ||
+        name.includes('aus album entfernen') ||
+        name.includes('vom album entfernen') ||
+        (name.includes('remove') && name.includes('album')) ||
+        (testId.includes('remove') && testId.includes('album'))
+      );
+    }) || null;
+  }
+
+  function getVisibleNativeRemovalDialog() {
+    const dialogSelectors = [
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      'dialog[open]',
+    ].join(',');
+
+    const dialogs = [...document.querySelectorAll(dialogSelectors)].filter(isVisible);
+
+    for (const dialog of dialogs) {
+      const dialogText = normalizeText(dialog.textContent || '');
+      const dialogLooksLikeRemoval =
+        dialogText.includes('remove') ||
+        dialogText.includes('entfernen') ||
+        dialogText.includes('supprimer') ||
+        dialogText.includes('delete');
+
+      if (dialogLooksLikeRemoval) {
+        return dialog;
       }
     }
 
-    if (unknown.length > 0) {
-      console.debug?.('[Immich Move] Could not verify album membership for some assets; treating as unresolved.', {
-        albumId,
-        unknownCount: unknown.length,
-        unknownIds: unknown,
-      });
+    return null;
+  }
+
+  function findNativeRemoveConfirmControl(dialogEl = null) {
+    const dialogs = dialogEl ? [dialogEl] : [getVisibleNativeRemovalDialog()].filter(Boolean);
+    if (dialogs.length === 0) return null;
+
+    let bestControl = null;
+    let bestScore = -1;
+
+    for (const dialog of dialogs) {
+      const controls = [
+        ...dialog.querySelectorAll('button, [role="button"], [role="menuitem"]'),
+      ].filter(isVisible);
+
+      for (const control of controls) {
+        const score = scoreNativeRemoveConfirmControl(control);
+        if (score > bestScore) {
+          bestScore = score;
+          bestControl = control;
+        }
+      }
     }
 
-    return remaining;
+    if (bestScore <= 0) return null;
+    return bestControl;
+  }
+
+  function scoreNativeRemoveConfirmControl(el) {
+    const name = getControlName(el);
+    if (!name) return 0;
+
+    if (
+      name.includes('cancel') ||
+      name.includes('abort') ||
+      name.includes('close') ||
+      name === 'no' ||
+      name === 'nein' ||
+      name === 'non'
+    ) {
+      return -100;
+    }
+
+    let score = 0;
+
+    if (
+      name === 'remove' ||
+      name === 'remove from album' ||
+      name === 'entfernen' ||
+      name === 'supprimer' ||
+      name === 'delete'
+    ) {
+      score += 120;
+    }
+
+    if (
+      name.includes('remove') ||
+      name.includes('entfernen') ||
+      name.includes('supprimer') ||
+      name.includes('delete')
+    ) {
+      score += 70;
+    }
+
+    if (
+      name.includes('yes') ||
+      name.includes('confirm') ||
+      name.includes('ok')
+    ) {
+      score += 25;
+    }
+
+    const className = normalizeText(el.getAttribute('class') || '');
+    const testId = normalizeText(el.getAttribute('data-testid') || '');
+    const ariaLabel = normalizeText(el.getAttribute('aria-label') || '');
+
+    if (
+      className.includes('destructive') ||
+      className.includes('danger') ||
+      className.includes('delete') ||
+      className.includes('remove') ||
+      testId.includes('remove') ||
+      testId.includes('delete') ||
+      testId.includes('confirm') ||
+      ariaLabel.includes('remove') ||
+      ariaLabel.includes('delete')
+    ) {
+      score += 18;
+    }
+
+    return score;
+  }
+
+  function clearImmichSelectionUiAfterMove() {
+    // Defensive fallback for stale checkbox visuals in date groups/cards.
+    for (const checkbox of document.querySelectorAll('input[type="checkbox"]:checked')) {
+      checkbox.checked = false;
+      checkbox.dispatchEvent(new Event('input', { bubbles: true }));
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  function dispatchEscapeForSelectionClear() {
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    }));
   }
 
   function installKeyboardShortcut() {
@@ -1347,7 +1307,7 @@
           const selectionCount = getImmichToolbarSelectionCount();
 
           if (visibleSelectedIds.length === 0 && selectionCount === 0) {
-            resetSelectionCache('escape cleared all selections');
+            resetSelectionCache();
             refreshButton();
           }
         }, 150);
@@ -1378,10 +1338,11 @@
     const button = document.getElementById('immich-move-to-album-button');
     if (!button) return;
 
-    const assetIds = getCurrentAssetIds();
     const albumId = getCurrentAlbumIdFromUrl();
 
     state.currentAlbumId = albumId;
+
+    const assetIds = getCurrentAssetIds();
 
     const shouldShow = assetIds.length > 0;
     button.hidden = !shouldShow;
@@ -1398,7 +1359,7 @@
     const assetIds = getCurrentAssetIds();
 
     if (getAssetIdFromUrl()) {
-      resetSelectionCache('single asset page move');
+      resetSelectionCache();
     }
 
     if (assetIds.length === 0) {
@@ -1408,12 +1369,6 @@
 
     const sourceAlbumId = getCurrentAlbumIdFromUrl();
 
-    console.debug?.('[Immich Move] Starting move', {
-      assetIds,
-      sourceAlbumId,
-      learnedAlbumId: state.learnedAlbumId,
-      url: location.href,
-    });
 
     if (!sourceAlbumId) {
       notify('No current album detected. The asset will be added to the target album, but cannot be removed from a source album.', 'info');
@@ -1439,6 +1394,12 @@
       explicitTargetResolveAt: 0,
       duplicateToastHandled: false,
     };
+
+    notify(
+      `Move in progress. Select target album for ${assetIds.length} asset${assetIds.length === 1 ? '' : 's'}...`,
+      'info',
+      { persist: true, spinner: true },
+    );
 
     const opened = await openNativeAddToAlbumModal();
 
@@ -1482,7 +1443,7 @@
 
     const ageMs = Date.now() - (pending.startedAt || Date.now());
     if (ageMs > CONFIG.membershipMonitorTimeoutMs) {
-      console.debug?.('[Immich Move] Membership monitor timed out; clearing pending move.');
+      notify('Move timed out before Immich confirmed the add operation. Nothing was removed.', 'error');
       state.pendingMove = null;
       stopMembershipMonitor();
       return;
@@ -1501,7 +1462,6 @@
           pending,
           targetAlbumId: resolvedExplicitTarget,
           confirmedIds: pending.assetIds,
-          detectionReason: 'explicit target selection fallback',
         });
         return;
       }
@@ -1512,17 +1472,11 @@
         const duplicateTarget = pending.explicitTargetAlbumId;
 
         if (duplicateTarget && duplicateTarget !== pending.sourceAlbumId) {
-          console.debug?.('[Immich Move] Duplicate toast detected; using explicit target album from UI selection.', {
-            sourceAlbumId: pending.sourceAlbumId,
-            explicitTargetAlbumId: duplicateTarget,
-            explicitTargetAlbumName: pending.explicitTargetAlbumName || '',
-          });
 
           await finalizeMoveAfterTargetDetected({
             pending,
             targetAlbumId: duplicateTarget,
             confirmedIds: pending.assetIds,
-            detectionReason: 'duplicate toast + explicit modal target',
           });
           return;
         }
@@ -1549,31 +1503,16 @@
       }
 
       if (!targetAlbumId) {
-        console.debug?.('[Immich Move] Membership fallback found multiple new albums; waiting for clearer signal.', {
-          probeAssetId,
-          baselineAlbumIds: pending.baselineAlbumIds,
-          currentAlbumIds,
-          newlyAddedAlbumIds,
-        });
         return;
       }
 
-      console.debug?.('[Immich Move] Membership fallback detected target album:', {
-        probeAssetId,
-        sourceAlbumId: pending.sourceAlbumId,
-        targetAlbumId,
-        baselineAlbumIds: pending.baselineAlbumIds,
-        currentAlbumIds,
-      });
 
       await finalizeMoveAfterTargetDetected({
         pending,
         targetAlbumId,
         confirmedIds: pending.assetIds,
-        detectionReason: 'membership fallback',
       });
     } catch (error) {
-      console.debug?.('[Immich Move] Membership fallback check failed:', error);
     } finally {
       if (state.pendingMove === pending) {
         pending.membershipCheckInFlight = false;
@@ -1599,7 +1538,6 @@
 
       if (!response.ok) {
         const text = await response.text().catch(() => '');
-        console.debug?.('[Immich Move] Failed to fetch asset album memberships:', response.status, text);
         return strict ? null : [];
       }
 
@@ -1617,7 +1555,6 @@
 
       return [...ids];
     } catch (error) {
-      console.debug?.('[Immich Move] Error while fetching asset album memberships:', error);
       return strict ? null : [];
     }
   }
@@ -1647,13 +1584,7 @@
       }
 
       // Close this menu before trying another trigger.
-      document.dispatchEvent(new KeyboardEvent('keydown', {
-        key: 'Escape',
-        code: 'Escape',
-        bubbles: true,
-        cancelable: true,
-      }));
-
+      dispatchEscapeForSelectionClear();
       await sleep(100);
     }
 
@@ -1671,13 +1602,7 @@
         return true;
       }
 
-      document.dispatchEvent(new KeyboardEvent('keydown', {
-        key: 'Escape',
-        code: 'Escape',
-        bubbles: true,
-        cancelable: true,
-      }));
-
+      dispatchEscapeForSelectionClear();
       await sleep(100);
     }
 
@@ -1721,10 +1646,6 @@
       if (candidateName) {
         pending.explicitTargetAlbumName = candidateName;
       }
-      console.debug?.('[Immich Move] Captured explicit target album from UI:', {
-        explicitTargetAlbumId: pending.explicitTargetAlbumId,
-        explicitTargetAlbumName: pending.explicitTargetAlbumName || '',
-      });
       return;
     }
 
@@ -1732,7 +1653,6 @@
       pending.explicitTargetAlbumName = candidateName;
       pending.explicitTargetSelectedAt = Date.now();
       pending.explicitTargetResolveAt = 0;
-      console.debug?.('[Immich Move] Captured explicit target album name from UI:', pending.explicitTargetAlbumName);
     }
 
     if (isDuplicateToastText(target.textContent || '')) {
@@ -1870,10 +1790,6 @@
 
     if (resolved && resolved !== pending.sourceAlbumId) {
       pending.explicitTargetAlbumId = resolved;
-      console.debug?.('[Immich Move] Resolved explicit target album ID by name:', {
-        explicitTargetAlbumName: pending.explicitTargetAlbumName,
-        explicitTargetAlbumId: resolved,
-      });
       return resolved;
     }
 
@@ -1917,11 +1833,6 @@
 
     if (byName.length === 1) return byName[0].id;
 
-    console.debug?.('[Immich Move] Ambiguous album-name resolution for explicit target.', {
-      explicitTargetAlbumName: albumName,
-      matches: byName.map((a) => ({ id: a.id, albumName: a.albumName })),
-      sourceAlbumId,
-    });
 
     return null;
   }
@@ -1942,7 +1853,6 @@
 
       if (!response.ok) {
         const text = await response.text().catch(() => '');
-        console.debug?.('[Immich Move] Failed to fetch album records:', response.status, text);
         return [];
       }
 
@@ -1956,7 +1866,6 @@
         }))
         .filter((row) => isUuid(row.id));
     } catch (error) {
-      console.debug?.('[Immich Move] Error while fetching album records:', error);
       return [];
     }
   }
@@ -2092,7 +2001,6 @@
         el.dispatchEvent(new EventCtor(type, options));
         return true;
       } catch (error) {
-        console.debug?.(`[Immich Move] Synthetic ${type} failed:`, error);
         return false;
       }
     };
@@ -2128,60 +2036,6 @@
 
     return updateSelectionCacheFromDom();
   }
-
-  function isLikelyAssetSelectionElement(el) {
-    if (!isVisible(el)) return false;
-
-    const idInside = findAssetIdsInside(el.closest('article, li, figure, div') || el);
-    if (idInside.length === 0) return false;
-
-    const text = accessibleName(el).toLowerCase();
-    const className = String(el.className || '').toLowerCase();
-
-    return (
-      el.matches('input[type="checkbox"]:checked') ||
-      el.getAttribute('aria-selected') === 'true' ||
-      el.getAttribute('aria-checked') === 'true' ||
-      el.getAttribute('data-selected') === 'true' ||
-      className.includes('selected') ||
-      text.includes('selected')
-    );
-  }
-
-  function findAssetIdsInside(root) {
-    if (!root) return [];
-
-    const ids = new Set();
-
-    for (const anchor of root.querySelectorAll('a[href]')) {
-      const id = extractAssetIdFromPath(anchor.getAttribute('href'));
-      if (id) ids.add(id);
-    }
-
-    // Also inspect generic attributes in case Immich exposes IDs in data fields.
-    for (const el of root.querySelectorAll('*')) {
-      for (const attr of el.getAttributeNames?.() || []) {
-        const value = el.getAttribute(attr);
-        if (!value) continue;
-
-        const matches = value.match(new RegExp(CONFIG.uuidRegex, 'ig')) || [];
-        for (const maybeId of matches) {
-          // Prefer IDs associated with photo/asset-ish links/attrs.
-          if (
-            attr.toLowerCase().includes('asset') ||
-            attr.toLowerCase().includes('photo') ||
-            value.includes('/photos/') ||
-            value.includes('/api/assets/')
-          ) {
-            ids.add(maybeId);
-          }
-        }
-      }
-    }
-
-    return [...ids];
-  }
-
   function getAssetIdFromUrl() {
     return extractAssetIdFromPath(window.location.pathname);
   }
@@ -2205,7 +2059,7 @@
     for (const pattern of patterns) {
       const match = text.match(pattern);
       if (match?.[1] && isUuid(match[1])) {
-        rememberSourceAlbum(match[1], 'URL');
+        rememberSourceAlbum(match[1]);
         return match[1];
       }
     }
@@ -2220,53 +2074,6 @@
     }
 
     return null;
-  }
-
-  function isCurrentAlbumPage() {
-    return Boolean(getCurrentAlbumIdFromUrl());
-  }
-
-  function findClickableByTerms(terms, options = {}) {
-    const elements = [
-      ...document.querySelectorAll(
-        [
-          'button',
-          '[role="button"]',
-          '[role="menuitem"]',
-          'a',
-          '[tabindex]',
-        ].join(','),
-      ),
-    ].filter(isVisible);
-
-    const matches = elements.filter((el) => {
-      const name = accessibleName(el).toLowerCase().trim();
-      if (!name) return false;
-
-      return terms.some((term) => {
-        const normalized = term.toLowerCase();
-        if (normalized === 'album') {
-          return name === 'add to album' || name === 'add to albums';
-        }
-
-        return name.includes(normalized);
-      });
-    });
-
-    return options.preferLast ? matches.at(-1) || null : matches[0] || null;
-  }
-
-  function accessibleName(el) {
-    return [
-      el.getAttribute?.('aria-label'),
-      el.getAttribute?.('title'),
-      el.getAttribute?.('data-testid'),
-      el.textContent,
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
   }
 
   function isTypingTarget(target) {
@@ -2303,20 +2110,40 @@
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
-  function notify(message, type = 'info') {
+  function notify(message, type = 'info', options = {}) {
+    const persist = Boolean(options?.persist);
+    const spinner = Boolean(options?.spinner);
+
     const existing = document.getElementById('immich-move-toast');
     existing?.remove();
 
     const toast = document.createElement('div');
     toast.id = 'immich-move-toast';
     toast.dataset.type = type;
-    toast.textContent = message;
+
+    if (spinner) {
+      toast.dataset.spinner = 'true';
+
+      const spinnerEl = document.createElement('span');
+      spinnerEl.className = 'immich-move-spinner';
+      spinnerEl.setAttribute('aria-hidden', 'true');
+
+      const textEl = document.createElement('span');
+      textEl.className = 'immich-move-toast-text';
+      textEl.textContent = message;
+
+      toast.append(spinnerEl, textEl);
+    } else {
+      toast.textContent = message;
+    }
 
     document.body.appendChild(toast);
 
-    window.setTimeout(() => {
-      toast.remove();
-    }, 4500);
+    if (!persist) {
+      window.setTimeout(() => {
+        toast.remove();
+      }, 4500);
+    }
   }
 
   function injectStyles() {
@@ -2389,6 +2216,32 @@
         background: rgba(31, 41, 55, 0.96);
         box-shadow: 0 10px 30px rgba(0,0,0,0.32);
         font: 500 14px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      #immich-move-toast[data-spinner="true"] {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .immich-move-spinner {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.45);
+        border-top-color: rgba(255, 255, 255, 1);
+        animation: immichMoveSpin 0.9s linear infinite;
+        flex: 0 0 auto;
+      }
+
+      .immich-move-toast-text {
+        min-width: 0;
+      }
+
+      @keyframes immichMoveSpin {
+        to {
+          transform: rotate(360deg);
+        }
       }
 
       #immich-move-toast[data-type="success"] {
