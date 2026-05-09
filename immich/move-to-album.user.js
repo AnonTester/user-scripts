@@ -2,7 +2,7 @@
 // @name         Immich Move to Album
 // @namespace    https://immich.app/
 // @icon         data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACIUlEQVQ4T3VTv2/TUBC+e47THxSpK5v7L5iAuuVZYurUslJRS/wBSSREBojiioGRZEVCpRsDUoMC7QKqm4GFlgbEWtVBlVigsUBQkcTvuGcR10nDSZbt83ff3fe9M8KE6MucRKCqIpL6s0D0+VbP+AeNcTiOJ87komVQ73gScYTCmfH3NVkSFwgG0nYVwcYkAiAsZlsH9QsE37zXrkHqMQNCheBnj95sTp20NoDASoNNIZbhnqoBdwDEOi59qGHX27FUNBgZmTUHcPqlNPv56RoSLQ9JxA21ImyxNXxHIRzsVptbSkECGumI6E63qg4QrRFCkC3DOqlzecjm4mm12eXk/IguASEN6FlWZBqXHy7t9eTVQwFQM8rkMTaRxQaG+L3SZEGpUFS7Y+b2Arjitz0M9Rd9MtPlnkx3T2R0K692FZDkcYKP6lLprpmTbF5hKjNnvXuAnSGQduzjdHedjyV8ZROz/X7hibnw8gUs8PFRPGKagLbtIpNWedRYqh6dq31AsxTvweKjM6v/J9odFutcf+7E/ZS7X+NHBkIbFHQgIwIYDJhE8KUa4DTCmODa+u+CokiDkxBoFN/nb+nOI7twDqAi5Bv1/xIgoL/v3ObODJwUIkUgPZr/Cb8O0xJ0zdH1yko400kWJ8UTsEsOOM+D5F+Y5EMsQ65aY1Mkxf8MHZ3P9n64CCJPfKyKZuvxLry96YKh8kBGGyDa1OYNq/4CqB/zUEwubakAAAAASUVORK5CYII=
-// @version      1.1.0
+// @version      1.1.1
 // @description  Move selected/current Immich assets to another album using Immich's native add-to-album modal, then remove them from the current album.
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
@@ -1469,7 +1469,18 @@
       if (!pending.duplicateToastHandled && sawRecentDuplicateToast()) {
         pending.duplicateToastHandled = true;
 
-        const duplicateTarget = pending.explicitTargetAlbumId;
+        let duplicateTarget = pending.explicitTargetAlbumId;
+
+        if (!duplicateTarget && pending.explicitTargetAlbumName) {
+          duplicateTarget = await resolveAlbumIdByNameForPending(
+            pending.explicitTargetAlbumName,
+            pending,
+          );
+
+          if (duplicateTarget) {
+            pending.explicitTargetAlbumId = duplicateTarget;
+          }
+        }
 
         if (duplicateTarget && duplicateTarget !== pending.sourceAlbumId) {
 
@@ -1537,7 +1548,6 @@
       });
 
       if (!response.ok) {
-        const text = await response.text().catch(() => '');
         return strict ? null : [];
       }
 
@@ -1649,7 +1659,7 @@
       return;
     }
 
-    if (candidateName && !pending.explicitTargetAlbumName) {
+    if (candidateName) {
       pending.explicitTargetAlbumName = candidateName;
       pending.explicitTargetSelectedAt = Date.now();
       pending.explicitTargetResolveAt = 0;
@@ -1797,7 +1807,7 @@
   }
 
   async function resolveAlbumIdByNameForPending(albumName, pending) {
-    const normalized = normalizeText(albumName);
+    const normalized = normalizeAlbumNameForMatching(albumName);
     if (!normalized) return null;
 
     let candidates = [];
@@ -1814,7 +1824,16 @@
       return null;
     }
 
-    const byName = candidates.filter((album) => normalizeText(album.albumName || '') === normalized);
+    const byName = candidates.filter((album) => {
+      const candidateName = normalizeAlbumNameForMatching(album.albumName || '');
+      if (!candidateName) return false;
+
+      return (
+        candidateName === normalized ||
+        candidateName.startsWith(`${normalized} `) ||
+        normalized.startsWith(`${candidateName} `)
+      );
+    });
 
     if (byName.length === 0) return null;
 
@@ -1852,7 +1871,6 @@
       });
 
       if (!response.ok) {
-        const text = await response.text().catch(() => '');
         return [];
       }
 
@@ -1868,6 +1886,20 @@
     } catch (error) {
       return [];
     }
+  }
+
+  function normalizeAlbumNameForMatching(value) {
+    let text = normalizeText(value);
+    if (!text) return '';
+
+    // Remove common trailing count badges from list rows, e.g.:
+    // "album name 8 items", "album name · 8 photos"
+    text = text
+      .replace(/\s*[·•|-]\s*\d+\s+(items?|assets?|photos?|videos?)\b.*$/i, '')
+      .replace(/\s+\d+\s+(items?|assets?|photos?|videos?)\b.*$/i, '')
+      .trim();
+
+    return text;
   }
 
   function findNativeAddMenuTriggers() {
