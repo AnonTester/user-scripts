@@ -2,7 +2,7 @@
 // @name         Immich Move to Album
 // @namespace    https://immich.app/
 // @icon         data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACIUlEQVQ4T3VTv2/TUBC+e47THxSpK5v7L5iAuuVZYurUslJRS/wBSSREBojiioGRZEVCpRsDUoMC7QKqm4GFlgbEWtVBlVigsUBQkcTvuGcR10nDSZbt83ff3fe9M8KE6MucRKCqIpL6s0D0+VbP+AeNcTiOJ87komVQ73gScYTCmfH3NVkSFwgG0nYVwcYkAiAsZlsH9QsE37zXrkHqMQNCheBnj95sTp20NoDASoNNIZbhnqoBdwDEOi59qGHX27FUNBgZmTUHcPqlNPv56RoSLQ9JxA21ImyxNXxHIRzsVptbSkECGumI6E63qg4QrRFCkC3DOqlzecjm4mm12eXk/IguASEN6FlWZBqXHy7t9eTVQwFQM8rkMTaRxQaG+L3SZEGpUFS7Y+b2Arjitz0M9Rd9MtPlnkx3T2R0K692FZDkcYKP6lLprpmTbF5hKjNnvXuAnSGQduzjdHedjyV8ZROz/X7hibnw8gUs8PFRPGKagLbtIpNWedRYqh6dq31AsxTvweKjM6v/J9odFutcf+7E/ZS7X+NHBkIbFHQgIwIYDJhE8KUa4DTCmODa+u+CokiDkxBoFN/nb+nOI7twDqAi5Bv1/xIgoL/v3ObODJwUIkUgPZr/Cb8O0xJ0zdH1yko400kWJ8UTsEsOOM+D5F+Y5EMsQ65aY1Mkxf8MHZ3P9n64CCJPfKyKZuvxLry96YKh8kBGGyDa1OYNq/4CqB/zUEwubakAAAAASUVORK5CYII=
-// @version      1.1.2
+// @version      1.1.3
 // @description  Move selected/current Immich assets to another album using Immich's native add-to-album modal, then remove them from the current album.
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
@@ -73,14 +73,6 @@
     return getAllowedPatterns().some((pattern) => wildcardToRegExp(pattern).test(url));
   }
 
-  if (!isAllowedImmichUrl()) {
-    return;
-  }
-
-  if (!document.title.toLowerCase().includes('immich') && !location.pathname.match(/\/(albums|photos|library)/)) {
-    return;
-  }
-
   GM_registerMenuCommand('Immich Move: configure URL patterns', () => {
     const current = getAllowedPatterns();
 
@@ -113,8 +105,12 @@
 
     setAllowedPatterns(patterns);
 
-    alert('Immich Move URL patterns saved. Reload the Immich page.');
+    alert('Immich Move URL patterns saved. New Immich tabs should activate automatically; reload only if already open and inactive.');
   });
+
+  if (!isAllowedImmichUrl()) {
+    return;
+  }
 
   const CONFIG = {
     keyboardShortcut: 'm',
@@ -143,61 +139,163 @@
     recentDuplicateToastAt: 0,
   };
 
-  injectStyles();
-  patchFetch();
-  installUi();
-  installKeyboardShortcut();
+  let scriptRuntimeReady = false;
+  let refreshTimer = null;
 
-  document.addEventListener(
-    'pointerdown',
-    (event) => {
-      const target = event.target instanceof Element ? event.target : null;
-      if (!target) return;
+  maybeBootstrapRuntime();
 
-      if (state.selectedAssetIds.size === 0) return;
+  function maybeBootstrapRuntime() {
+    let startupObserver = null;
+    let startupPollTimer = null;
+    let startupTimeoutTimer = null;
+    let startupEventHandler = null;
 
-      const clearButton = findClickedClearSelectionButton(target);
+    const cleanup = () => {
+      startupObserver?.disconnect();
+      startupObserver = null;
 
-      if (!clearButton) return;
+      if (startupPollTimer) {
+        window.clearInterval(startupPollTimer);
+        startupPollTimer = null;
+      }
 
-      resetSelectionCache();
-      refreshButton();
+      if (startupTimeoutTimer) {
+        window.clearTimeout(startupTimeoutTimer);
+        startupTimeoutTimer = null;
+      }
 
-      // Run again after Immich updates its own UI.
-      window.setTimeout(() => {
+      if (startupEventHandler) {
+        window.removeEventListener('popstate', startupEventHandler, true);
+        window.removeEventListener('hashchange', startupEventHandler, true);
+        document.removeEventListener('visibilitychange', startupEventHandler, true);
+      }
+    };
+
+    const tryStart = () => {
+      if (scriptRuntimeReady) {
+        cleanup();
+        return true;
+      }
+      if (!isLikelyImmichRuntimeContext()) return false;
+
+      initializeScriptRuntime();
+      scriptRuntimeReady = true;
+      cleanup();
+      return true;
+    };
+
+    startupEventHandler = () => {
+      tryStart();
+    };
+
+    if (tryStart()) return;
+
+    startupObserver = new MutationObserver(() => {
+      tryStart();
+    });
+    startupObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+
+    startupPollTimer = window.setInterval(() => {
+      tryStart();
+    }, 1200);
+
+    startupTimeoutTimer = window.setTimeout(() => {
+      if (!scriptRuntimeReady) {
+        cleanup();
+      }
+    }, 60_000);
+
+    window.addEventListener('popstate', startupEventHandler, true);
+    window.addEventListener('hashchange', startupEventHandler, true);
+    document.addEventListener('visibilitychange', startupEventHandler, true);
+  }
+
+  function isLikelyImmichRuntimeContext() {
+    const titleText = normalizeText(document.title || '');
+    if (titleText.includes('immich')) return true;
+
+    const pathText = normalizeText(location.pathname || '');
+    if (/\/(albums|photos|photo|library|people|search|timeline|memories)(?:\/|$)/i.test(pathText)) {
+      return true;
+    }
+
+    const appNameMeta = document.querySelector('meta[name="application-name"]');
+    if (normalizeText(appNameMeta?.getAttribute('content') || '').includes('immich')) {
+      return true;
+    }
+
+    return Boolean(
+      document.querySelector(
+        [
+          '[data-testid*="immich"]',
+          'a[href*="/albums/"]',
+          'a[href*="/photos/"]',
+          'a[href*="/photo/"]',
+          'a[href*="/library"]',
+        ].join(','),
+      ),
+    );
+  }
+
+  function initializeScriptRuntime() {
+    injectStyles();
+    patchFetch();
+    installUi();
+    installKeyboardShortcut();
+
+    document.addEventListener(
+      'pointerdown',
+      (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+
+        if (state.selectedAssetIds.size === 0) return;
+
+        const clearButton = findClickedClearSelectionButton(target);
+
+        if (!clearButton) return;
+
         resetSelectionCache();
         refreshButton();
-      }, 250);
-    },
-    true,
-  );
 
-  document.addEventListener(
-    'click',
-    (event) => {
-      maybeCaptureTargetAlbumSelection(event);
-
-      if (state.selectedAssetIds.size === 0) return;
-
-      window.setTimeout(() => {
-        const visibleSelectedIds = getVisibleSelectedAssetIds();
-        const toolbarSelectionCount = getImmichToolbarSelectionCount();
-
-        if (
-          !isSelectionCacheStillActive(visibleSelectedIds.length, toolbarSelectionCount)
-        ) {
+        // Run again after Immich updates its own UI.
+        window.setTimeout(() => {
           resetSelectionCache();
           refreshButton();
-        }
-      }, 300);
-    },
-    true,
-  );
+        }, 250);
+      },
+      true,
+    );
 
-  const observer = new MutationObserver(scheduleRefresh);
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+    document.addEventListener(
+      'click',
+      (event) => {
+        maybeCaptureTargetAlbumSelection(event);
 
-  let refreshTimer = null;
+        if (state.selectedAssetIds.size === 0) return;
+
+        window.setTimeout(() => {
+          const visibleSelectedIds = getVisibleSelectedAssetIds();
+          const toolbarSelectionCount = getImmichToolbarSelectionCount();
+
+          if (
+            !isSelectionCacheStillActive(visibleSelectedIds.length, toolbarSelectionCount)
+          ) {
+            resetSelectionCache();
+            refreshButton();
+          }
+        }, 300);
+      },
+      true,
+    );
+
+    const observer = new MutationObserver(scheduleRefresh);
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+
+    window.setInterval(refreshButton, CONFIG.pollMs);
+    refreshButton();
+  }
+
   function scheduleRefresh() {
     if (refreshTimer) return;
     refreshTimer = window.setTimeout(() => {
@@ -205,9 +303,6 @@
       refreshButton();
     }, 150);
   }
-
-  window.setInterval(refreshButton, CONFIG.pollMs);
-  refreshButton();
 
   function findClickedClearSelectionButton(target) {
     const button = target.closest('button, [role="button"]');

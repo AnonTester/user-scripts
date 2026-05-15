@@ -2,7 +2,7 @@
 // @name         Immich quick rotate and save
 // @namespace    https://immich.app/
 // @icon         data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACIUlEQVQ4T3VTv2/TUBC+e47THxSpK5v7L5iAuuVZYurUslJRS/wBSSREBojiioGRZEVCpRsDUoMC7QKqm4GFlgbEWtVBlVigsUBQkcTvuGcR10nDSZbt83ff3fe9M8KE6MucRKCqIpL6s0D0+VbP+AeNcTiOJ87komVQ73gScYTCmfH3NVkSFwgG0nYVwcYkAiAsZlsH9QsE37zXrkHqMQNCheBnj95sTp20NoDASoNNIZbhnqoBdwDEOi59qGHX27FUNBgZmTUHcPqlNPv56RoSLQ9JxA21ImyxNXxHIRzsVptbSkECGumI6E63qg4QrRFCkC3DOqlzecjm4mm12eXk/IguASEN6FlWZBqXHy7t9eTVQwFQM8rkMTaRxQaG+L3SZEGpUFS7Y+b2Arjitz0M9Rd9MtPlnkx3T2R0K692FZDkcYKP6lLprpmTbF5hKjNnvXuAnSGQduzjdHedjyV8ZROz/X7hibnw8gUs8PFRPGKagLbtIpNWedRYqh6dq31AsxTvweKjM6v/J9odFutcf+7E/ZS7X+NHBkIbFHQgIwIYDJhE8KUa4DTCmODa+u+CokiDkxBoFN/nb+nOI7twDqAi5Bv1/xIgoL/v3ObODJwUIkUgPZr/Cb8O0xJ0zdH1yko400kWJ8UTsEsOOM+D5F+Y5EMsQ65aY1Mkxf8MHZ3P9n64CCJPfKyKZuvxLry96YKh8kBGGyDa1OYNq/4CqB/zUEwubakAAAAASUVORK5CYII=
-// @version      1.2.1
+// @version      1.2.2
 // @description  Immich userscript. R rotates clockwise and saves; Shift+R rotates counterclockwise and saves. Adds overlay rotate buttons.
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
@@ -58,14 +58,6 @@
     return getAllowedPatterns().some((pattern) => wildcardToRegExp(pattern).test(url));
   }
 
-  if (!isAllowedImmichUrl()) {
-    return;
-  }
-
-  if (!document.title.toLowerCase().includes('immich') && !location.pathname.match(/\/(albums|photos|library)/)) {
-    return;
-  }
-
   GM_registerMenuCommand('Immich Rotate: configure URL patterns', () => {
     const current = getAllowedPatterns();
 
@@ -98,8 +90,12 @@
 
     setAllowedPatterns(patterns);
 
-    alert('Immich Move URL patterns saved. Reload the Immich page.');
+    alert('Immich Rotate URL patterns saved. New Immich tabs should activate automatically; reload only if already open and inactive.');
   });
+
+  if (!isAllowedImmichUrl()) {
+    return;
+  }
 
   const CONFIG = {
     debug: false,
@@ -131,8 +127,11 @@
   let busy = false;
   let overlay = null;
   let routeTick = 0;
+  let scriptRuntimeReady = false;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  maybeBootstrapRuntime();
 
   function log(...args) {
     if (CONFIG.debug) console.log('[Immich quick rotate]', ...args);
@@ -144,6 +143,142 @@
 
   function currentPath() {
     return window.location.pathname;
+  }
+
+  function normalizeText(value) {
+    return String(value || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function maybeBootstrapRuntime() {
+    let startupObserver = null;
+    let startupPollTimer = null;
+    let startupTimeoutTimer = null;
+    let startupEventHandler = null;
+
+    const cleanup = () => {
+      startupObserver?.disconnect();
+      startupObserver = null;
+
+      if (startupPollTimer) {
+        window.clearInterval(startupPollTimer);
+        startupPollTimer = null;
+      }
+
+      if (startupTimeoutTimer) {
+        window.clearTimeout(startupTimeoutTimer);
+        startupTimeoutTimer = null;
+      }
+
+      if (startupEventHandler) {
+        window.removeEventListener('popstate', startupEventHandler, true);
+        window.removeEventListener('hashchange', startupEventHandler, true);
+        document.removeEventListener('visibilitychange', startupEventHandler, true);
+      }
+    };
+
+    const tryStart = () => {
+      if (scriptRuntimeReady) {
+        cleanup();
+        return true;
+      }
+      if (!isLikelyImmichRuntimeContext()) return false;
+
+      initializeScriptRuntime();
+      scriptRuntimeReady = true;
+      cleanup();
+      return true;
+    };
+
+    startupEventHandler = () => {
+      tryStart();
+    };
+
+    if (tryStart()) return;
+
+    startupObserver = new MutationObserver(() => {
+      tryStart();
+    });
+
+    const observeTarget = document.documentElement || document;
+    startupObserver.observe(observeTarget, { childList: true, subtree: true, attributes: true });
+
+    startupPollTimer = window.setInterval(() => {
+      tryStart();
+    }, 1200);
+
+    startupTimeoutTimer = window.setTimeout(() => {
+      if (!scriptRuntimeReady) {
+        cleanup();
+      }
+    }, 60_000);
+
+    window.addEventListener('popstate', startupEventHandler, true);
+    window.addEventListener('hashchange', startupEventHandler, true);
+    document.addEventListener('visibilitychange', startupEventHandler, true);
+  }
+
+  function isLikelyImmichRuntimeContext() {
+    const titleText = normalizeText(document.title || '');
+    if (titleText.includes('immich')) return true;
+
+    const pathText = normalizeText(location.pathname || '');
+    if (/\/(albums|photos|photo|library|people|search|timeline|memories)(?:\/|$)/i.test(pathText)) {
+      return true;
+    }
+
+    const appNameMeta = document.querySelector('meta[name="application-name"]');
+    if (normalizeText(appNameMeta?.getAttribute('content') || '').includes('immich')) {
+      return true;
+    }
+
+    return Boolean(
+      document.querySelector(
+        [
+          '[data-testid*="immich"]',
+          'a[href*="/albums/"]',
+          'a[href*="/photos/"]',
+          'a[href*="/photo/"]',
+          'a[href*="/library"]',
+        ].join(','),
+      ),
+    );
+  }
+
+  function initializeScriptRuntime() {
+    patchHistoryMethod('pushState');
+    patchHistoryMethod('replaceState');
+
+    window.addEventListener('popstate', onRouteMaybeChanged);
+    window.addEventListener('hashchange', onRouteMaybeChanged);
+
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.defaultPrevented) return;
+        if (event.ctrlKey || event.altKey || event.metaKey) return;
+        if (isTypingTarget(event.target)) return;
+        if (!isPhotoViewerRoute()) return;
+
+        if (event.key.toLowerCase() === 'r') {
+          event.preventDefault();
+          event.stopPropagation();
+
+          rotateAndSave(event.shiftKey ? 'counterclockwise' : 'clockwise');
+        }
+
+        // Do not intercept "e"; Immich can keep handling editor open itself.
+      },
+      true,
+    );
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start, { once: true });
+    } else {
+      start();
+    }
   }
 
   function isPhotoViewerRoute() {
@@ -517,32 +652,6 @@
     };
   }
 
-  patchHistoryMethod('pushState');
-  patchHistoryMethod('replaceState');
-
-  window.addEventListener('popstate', onRouteMaybeChanged);
-  window.addEventListener('hashchange', onRouteMaybeChanged);
-
-  document.addEventListener(
-    'keydown',
-    (event) => {
-      if (event.defaultPrevented) return;
-      if (event.ctrlKey || event.altKey || event.metaKey) return;
-      if (isTypingTarget(event.target)) return;
-      if (!isPhotoViewerRoute()) return;
-
-      if (event.key.toLowerCase() === 'r') {
-        event.preventDefault();
-        event.stopPropagation();
-
-        rotateAndSave(event.shiftKey ? 'counterclockwise' : 'clockwise');
-      }
-
-      // Do not intercept "e"; Immich can keep handling editor open itself.
-    },
-    true
-  );
-
   function start() {
     ensureOverlay();
     updateOverlayVisibility();
@@ -558,11 +667,5 @@
     });
 
     log('loaded');
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start, { once: true });
-  } else {
-    start();
   }
 })();
