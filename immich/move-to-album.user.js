@@ -2,7 +2,7 @@
 // @name         Immich Move to Album
 // @namespace    https://immich.app/
 // @icon         data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACIUlEQVQ4T3VTv2/TUBC+e47THxSpK5v7L5iAuuVZYurUslJRS/wBSSREBojiioGRZEVCpRsDUoMC7QKqm4GFlgbEWtVBlVigsUBQkcTvuGcR10nDSZbt83ff3fe9M8KE6MucRKCqIpL6s0D0+VbP+AeNcTiOJ87komVQ73gScYTCmfH3NVkSFwgG0nYVwcYkAiAsZlsH9QsE37zXrkHqMQNCheBnj95sTp20NoDASoNNIZbhnqoBdwDEOi59qGHX27FUNBgZmTUHcPqlNPv56RoSLQ9JxA21ImyxNXxHIRzsVptbSkECGumI6E63qg4QrRFCkC3DOqlzecjm4mm12eXk/IguASEN6FlWZBqXHy7t9eTVQwFQM8rkMTaRxQaG+L3SZEGpUFS7Y+b2Arjitz0M9Rd9MtPlnkx3T2R0K692FZDkcYKP6lLprpmTbF5hKjNnvXuAnSGQduzjdHedjyV8ZROz/X7hibnw8gUs8PFRPGKagLbtIpNWedRYqh6dq31AsxTvweKjM6v/J9odFutcf+7E/ZS7X+NHBkIbFHQgIwIYDJhE8KUa4DTCmODa+u+CokiDkxBoFN/nb+nOI7twDqAi5Bv1/xIgoL/v3ObODJwUIkUgPZr/Cb8O0xJ0zdH1yko400kWJ8UTsEsOOM+D5F+Y5EMsQ65aY1Mkxf8MHZ3P9n64CCJPfKyKZuvxLry96YKh8kBGGyDa1OYNq/4CqB/zUEwubakAAAAASUVORK5CYII=
-// @version      1.1.1
+// @version      1.1.2
 // @description  Move selected/current Immich assets to another album using Immich's native add-to-album modal, then remove them from the current album.
 // @author       AnonTester
 // @homepageURL  https://github.com/AnonTester/user-scripts
@@ -125,6 +125,8 @@
     pollMs: 500,
     membershipPollMs: 900,
     membershipMonitorTimeoutMs: 90_000,
+    membershipCancelGraceMs: 1_400,
+    postSelectionFinalizeGraceMs: 450,
   };
 
   const state = {
@@ -316,6 +318,12 @@
     window.fetch = async function patchedImmichFetch(input, init = {}) {
       const requestInfo = await getRequestInfo(input, init);
 
+      try {
+        markPendingMoveAlbumAddRequest(requestInfo);
+      } catch (error) {
+        console.error('[Immich Move] Failed while marking album-add request:', error);
+      }
+
       const response = await originalFetch.apply(this, arguments);
 
       try {
@@ -363,6 +371,12 @@
             obj[key] = value;
           }
           this.__immichMoveRequestInfo.bodyText = JSON.stringify(obj);
+        }
+
+        try {
+          markPendingMoveAlbumAddRequest(this.__immichMoveRequestInfo);
+        } catch (error) {
+          console.error('[Immich Move] Failed while marking XHR album-add request:', error);
         }
       }
 
@@ -476,6 +490,27 @@
     }
   }
 
+  function markPendingMoveAlbumAddRequest(requestInfo) {
+    const pending = state.pendingMove;
+    if (!pending || !requestInfo) return;
+    if (!['PUT', 'POST', 'PATCH'].includes(requestInfo.method)) return;
+
+    const parsedBody = parseJsonBody(requestInfo.bodyText);
+    const requestIds = parseIdsFromRequestBody(requestInfo.bodyText, parsedBody);
+    if (requestIds.length === 0) return;
+
+    const albumIds = parseAlbumIdsFromRequestBody(requestInfo.bodyText, parsedBody);
+    const url = safeParseUrl(requestInfo.url);
+    const path = url?.pathname || '';
+    const pathLooksAlbumAdd = /\/api\/albums\/.+\/assets(?:\/|$)/i.test(path);
+
+    if (albumIds.length === 0 && !pathLooksAlbumAdd) {
+      return;
+    }
+
+    pending.addRequestObservedAt = Date.now();
+  }
+
   async function maybeHandleAlbumAddResponse(requestInfo, response) {
     const pending = state.pendingMove;
     if (!pending) return;
@@ -483,14 +518,27 @@
     if (!['PUT', 'POST', 'PATCH'].includes(requestInfo.method)) return;
 
     const parsedBody = parseJsonBody(requestInfo.bodyText);
-    const targetAlbumId = extractTargetAlbumIdFromAddRequest(requestInfo, parsedBody, pending);
+    const requestIds = parseIdsFromRequestBody(requestInfo.bodyText, parsedBody);
+    const albumIdsInRequest = parseAlbumIdsFromRequestBody(requestInfo.bodyText, parsedBody);
+    const requestLooksAlbumRelated =
+      requestInfo.url.includes('/api/albums') ||
+      albumIdsInRequest.length > 0;
+
+    if (!requestLooksAlbumRelated) {
+      return;
+    }
+
+    let targetAlbumId = extractTargetAlbumIdFromAddRequest(requestInfo, parsedBody, pending);
+
+    if (!targetAlbumId && requestIds.length > 0) {
+      targetAlbumId = await resolveTargetAlbumIdFromPendingSelection(pending);
+    }
 
     if (!targetAlbumId) {
       return;
     }
 
-
-    const requestIds = parseIdsFromRequestBody(requestInfo.bodyText, parsedBody);
+    pending.addResponseObservedAt = Date.now();
 
     let relevantIds;
 
@@ -668,7 +716,7 @@
 
   function isDuplicateToken(value) {
     if (typeof value !== 'string') return false;
-    return /\bduplicate\b|\balready\s+exists?\b/i.test(value);
+    return /\bduplicate\b|\balready\s+exists?\b|\balready\s+part\s+of\s+the\s+album\b|\balready\s+in\s+(?:the\s+)?album\b/i.test(value);
   }
 
   function isLikelyFailureToken(value) {
@@ -715,7 +763,7 @@
     if (!url) return null;
 
     const match = url.pathname.match(
-      new RegExp(`/api/albums/(${CONFIG.uuidRegex})/assets(?:/)?$`, 'i'),
+      new RegExp(`/api/albums/(${CONFIG.uuidRegex})/assets(?:/|$)`, 'i'),
     );
 
     return match?.[1] || null;
@@ -755,6 +803,28 @@
       return albumIds[0];
     }
 
+
+    return null;
+  }
+
+  async function resolveTargetAlbumIdFromPendingSelection(pending) {
+    if (!pending) return null;
+
+    if (isUuid(pending.explicitTargetAlbumId) && pending.explicitTargetAlbumId !== pending.sourceAlbumId) {
+      return pending.explicitTargetAlbumId;
+    }
+
+    if (!pending.explicitTargetAlbumName) return null;
+
+    const resolved = await resolveAlbumIdByNameForPending(
+      pending.explicitTargetAlbumName,
+      pending,
+    );
+
+    if (resolved && resolved !== pending.sourceAlbumId) {
+      pending.explicitTargetAlbumId = resolved;
+      return resolved;
+    }
 
     return null;
   }
@@ -1393,6 +1463,8 @@
       explicitTargetSelectedAt: 0,
       explicitTargetResolveAt: 0,
       duplicateToastHandled: false,
+      addRequestObservedAt: 0,
+      addResponseObservedAt: 0,
     };
 
     notify(
@@ -1440,21 +1512,25 @@
     }
 
     if (pending.membershipCheckInFlight) return;
-
-    const ageMs = Date.now() - (pending.startedAt || Date.now());
-    if (ageMs > CONFIG.membershipMonitorTimeoutMs) {
-      notify('Move timed out before Immich confirmed the add operation. Nothing was removed.', 'error');
-      state.pendingMove = null;
-      stopMembershipMonitor();
-      return;
-    }
-
-    const probeAssetId = pending.probeAssetId;
-    if (!probeAssetId) return;
-
     pending.membershipCheckInFlight = true;
 
     try {
+      const ageMs = Date.now() - (pending.startedAt || Date.now());
+      if (ageMs > CONFIG.membershipMonitorTimeoutMs) {
+        notify('Move timed out before Immich confirmed the add operation. Nothing was removed.', 'error');
+        state.pendingMove = null;
+        stopMembershipMonitor();
+        return;
+      }
+
+      const handledFromClosedPicker = await maybeResolvePendingMoveWhenPickerClosed(pending, ageMs);
+      if (handledFromClosedPicker) {
+        return;
+      }
+
+      const probeAssetId = pending.probeAssetId;
+      if (!probeAssetId) return;
+
       const resolvedExplicitTarget = await tryResolveExplicitTargetAlbum(pending, ageMs);
 
       if (resolvedExplicitTarget && resolvedExplicitTarget !== pending.sourceAlbumId) {
@@ -1529,6 +1605,101 @@
         pending.membershipCheckInFlight = false;
       }
     }
+  }
+
+  async function maybeResolvePendingMoveWhenPickerClosed(pending, ageMs) {
+    if (!pending) return false;
+    if (ageMs < CONFIG.membershipCancelGraceMs) return false;
+    if (isNativeAddToAlbumPickerVisible()) return false;
+
+    const now = Date.now();
+    const addRequestSeen = Number(pending.addRequestObservedAt || 0) > 0;
+    const addResponseSeen = Number(pending.addResponseObservedAt || 0) > 0;
+    const selectedAt = Number(pending.explicitTargetSelectedAt || 0);
+    const selectionAgeMs = selectedAt > 0 ? now - selectedAt : 0;
+
+    if (!addRequestSeen && selectedAt > 0 && selectionAgeMs >= CONFIG.postSelectionFinalizeGraceMs) {
+      const targetAlbumId = await resolveTargetAlbumIdFromPendingSelection(pending);
+
+      if (targetAlbumId && targetAlbumId !== pending.sourceAlbumId) {
+        await finalizeMoveAfterTargetDetected({
+          pending,
+          targetAlbumId,
+          confirmedIds: pending.assetIds,
+        });
+        return true;
+      }
+    }
+
+    if (!addRequestSeen && !addResponseSeen && selectedAt === 0) {
+      notify('Move cancelled before selecting a target album.', 'info');
+      state.pendingMove = null;
+      stopMembershipMonitor();
+      return true;
+    }
+
+    if (!addRequestSeen && !addResponseSeen && selectedAt > 0 && selectionAgeMs > CONFIG.membershipCancelGraceMs * 3) {
+      notify('Move cancelled or target album could not be resolved. Nothing was removed.', 'info');
+      state.pendingMove = null;
+      stopMembershipMonitor();
+      return true;
+    }
+
+    return false;
+  }
+
+  function isNativeAddToAlbumPickerVisible() {
+    const dialogs = [
+      ...document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]'),
+    ].filter(isVisible);
+
+    for (const dialog of dialogs) {
+      const text = normalizeText(dialog.textContent || '');
+
+      if (
+        text.includes('add to album') ||
+        text.includes('add to shared album') ||
+        text.includes('select album') ||
+        text.includes('choose album') ||
+        text.includes('create album') ||
+        text.includes('new album') ||
+        text.includes('zu album hinzufügen') ||
+        text.includes('album auswählen')
+      ) {
+        return true;
+      }
+
+      const inputs = [
+        ...dialog.querySelectorAll('input, [role="textbox"]'),
+      ].filter(isVisible);
+
+      const hasAlbumishInput = inputs.some((input) => {
+        const metadata = normalizeText(
+          [
+            input.getAttribute?.('aria-label'),
+            input.getAttribute?.('placeholder'),
+            input.getAttribute?.('name'),
+            input.getAttribute?.('data-testid'),
+          ]
+            .filter(Boolean)
+            .join(' '),
+        );
+
+        return metadata.includes('album') || metadata.includes('search');
+      });
+
+      const hasAlbumishControl = [
+        ...dialog.querySelectorAll('button, [role="button"], [role="menuitem"]'),
+      ]
+        .filter(isVisible)
+        .some((control) => getControlName(control).includes('album'));
+
+      if (hasAlbumishInput && hasAlbumishControl) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   async function getAlbumIdsForAsset(assetId, options = {}) {
